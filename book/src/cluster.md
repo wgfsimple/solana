@@ -28,7 +28,7 @@ its copy.
 
 ## Joining a Cluster
 
-Fullnodes and replicators enter the cluster via registration messages sent to
+Validators and replicators enter the cluster via registration messages sent to
 its *control plane*. The control plane is implemented using a *gossip*
 protocol, meaning that a node may register with any existing node, and expect
 its registration to propagate to all nodes in the cluster. The time it takes
@@ -96,4 +96,5 @@ that header information becomes the primary consumer of network bandwidth. At
 the time of this writing, the approach is scaling well up to about 150
 validators. To scale up to hundreds of thousands of validators, each node can
 apply the same technique as the leader node to another set of nodes of equal
-size. We call the technique *data plane fanout*, but it is not yet implemented.
+size. We call the technique *data plane fanout*; learn more in the [data plan
+fanout](data-plane-fanout.md) section.

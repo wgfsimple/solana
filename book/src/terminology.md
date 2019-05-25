@@ -19,17 +19,26 @@ A fraction of a [block](#block); the smallest unit sent between
 #### block
 
 A contiguous set of [entries](#entry) on the ledger covered by a
-[vote](#ledger-vote).  The duration of a block is some cluster-configured
-number of [ticks](#tick).  Also called [voting period](#voting-period).
+[vote](#ledger-vote). A [leader](#leader) produces at most one block per
+[slot](#slot).
 
 #### block height
 
-The number of [blocks](#block) beneath the current block plus one. The [genesis
-block](#genesis-block), for example, has block height 1.
+The number of [blocks](#block) beneath the current block. The first block after
+the [genesis block](#genesis-block) has height zero.
+
+#### block id
+
+The [entry id](#entry-id) of the last entry in a [block](#block).
 
 #### bootstrap leader
 
 The first [fullnode](#fullnode) to take the [leader](#leader) role.
+
+#### CBC block
+
+Smallest encrypted chunk of ledger, an encrypted ledger segment would be made of
+many CBC blocks. `ledger_segment_size / cbc_block_size` to be exact.
 
 #### client
 
@@ -59,10 +68,23 @@ consensus.
 An off-chain service that acts as a custodian for a user's private key. It
 typically serves to validate and sign transactions.
 
+#### fake storage proof
+
+A proof which has the same format as a storage proof, but the sha state is
+actually from hashing a known ledger value which the storage client can reveal
+and is also easily verifiable by the network on-chain.
+
 #### entry
 
 An entry on the [ledger](#ledger) either a [tick](#tick) or a [transactions
 entry](#transactions-entry).
+
+#### entry id
+
+A globally unique identifier that is also a proof that the [entry](#entry) was
+generated after a duration of time, all [transactions](#transaction) included
+in the entry, and all previous entries on the [ledger](#ledger). See [Proof of
+History](#proof-of-history).
 
 #### epoch
 
@@ -80,13 +102,13 @@ A full participant in the [cluster](#cluster) either a [leader](#leader) or
 
 #### fullnode state
 
-The result of interpreting all programs on the ledger a given [tick
+The result of interpreting all programs on the ledger at a given [tick
 height](#tick-height). It includes at least the set of all [accounts](#account)
 holding nonzero [native tokens](#native-tokens).
 
 #### genesis block
 
-The first [block](#block) of the [ledger](#ledger).
+The configuration file that prepares the [ledger](#ledger) for the first [block](#block).
 
 #### hash
 
@@ -99,7 +121,7 @@ in a [transaction](#instruction).
 
 #### keypair
 
-A [public key](#public-key) and coesponding [secret key](#secret-key).
+A [public key](#public-key) and corresponding [secret key](#secret-key).
 
 #### lamport
 
@@ -127,6 +149,11 @@ at any moment in time.
 A list of [entries](#entry) containing [transactions](#transaction) signed by
 [clients](#client).
 
+#### ledger segment
+
+Portion of the ledger which is downloaded by the replicator where storage proof
+data is derived.
+
 #### ledger vote
 
 A [hash](#hash) of the [fullnode's state](#fullnode-state) at a given [tick
@@ -152,7 +179,7 @@ The [token](#token) used to track work done by [nodes](#node) in a cluster.
 
 #### node
 
-A computer particpating in a [cluster](#cluster).
+A computer participating in a [cluster](#cluster).
 
 #### node count
 
@@ -166,7 +193,7 @@ See [Proof of History](#proof-of-history).
 
 The code that interprets [instructions](#instruction).
 
-#### program ID
+#### program id
 
 The public key of the [account](#account) containing a [program](#program).
 
@@ -181,6 +208,11 @@ verified in less time than it took to produce.
 
 The public key of a [keypair](#keypair).
 
+#### replicator
+
+Storage mining client, stores some part of the ledger enumerated in blocks and
+submits storage proofs to the chain. Not a full-node.
+
 #### runtime
 
 The component of a [fullnode](#fullnode) responsible for [program](#program)
@@ -192,8 +224,8 @@ The private key of a [keypair](#keypair).
 
 #### slot
 
-The time (i.e. number of [blocks](#block)) for which a [leader](#leader)
-ingests transactions and produces [entries](#entry).
+The period of time for which a [leader](#leader) ingests transactions and
+produces a [block](#block).
 
 #### sol
 
@@ -204,6 +236,32 @@ by the company Solana.
 
 Tokens forfeit to the [cluster](#cluster) if malicious [fullnode](#fullnode)
 behavior can be proven.
+
+#### storage proof
+
+A set of sha hash state which is constructed by sampling the encrypted version
+of the stored ledger segment at certain offsets.
+
+#### storage proof challenge
+
+A transaction from a replicator that verifiably proves that a validator
+confirmed a fake proof.
+
+#### storage proof claim
+
+A transaction from a validator which is after the timeout period given from the
+storage proof confirmation and which no successful challenges have been
+observed which rewards the parties of the storage proofs and confirmations.
+
+#### storage proof confirmation
+
+A transaction by a validator which indicates the set of real and fake proofs
+submitted by a storage miner. The transaction would contain a list of proof
+hash values and a bit which says if this hash is valid or fake.
+
+#### storage validation capacity
+
+The number of keys and samples that a validator can verify each storage epoch.
 
 #### thin client
 
@@ -252,8 +310,3 @@ that it ran, which can then be verified in less time than it took to produce.
 #### vote
 
 See [ledger vote](#ledger-vote).
-
-#### voting period
-
-The duration of a [block](#block).
-

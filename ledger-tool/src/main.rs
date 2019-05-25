@@ -1,12 +1,13 @@
-use clap::{crate_version, App, Arg, SubCommand};
-use solana::bank::Bank;
-use solana::ledger::{read_ledger, verify_ledger};
+use clap::{crate_description, crate_name, crate_version, App, Arg, SubCommand};
+use solana::blocktree::Blocktree;
+use solana::blocktree_processor::process_blocktree;
+use solana_sdk::genesis_block::GenesisBlock;
 use std::io::{stdout, Write};
 use std::process::exit;
 
 fn main() {
     solana_logger::setup();
-    let matches = App::new("ledger-tool")
+    let matches = App::new(crate_name!()).about(crate_description!())
         .version(crate_version!())
         .arg(
             Arg::with_name("ledger")
@@ -23,13 +24,15 @@ fn main() {
                 .long("head")
                 .value_name("NUM")
                 .takes_value(true)
-                .help("Limit to at most the first NUM entries in ledger\n  (only applies to verify, print, json commands)"),
+                .help("Limit to at most the first NUM entries in ledger\n  (only applies to print and json commands)"),
         )
         .arg(
-            Arg::with_name("precheck")
-                .short("p")
-                .long("precheck")
-                .help("Use ledger_verify() to check internal ledger consistency before proceeding"),
+            Arg::with_name("min-hashes")
+                .short("h")
+                .long("min-hashes")
+                .value_name("NUM")
+                .takes_value(true)
+                .help("Skip entries with fewer than NUM hashes\n  (only applies to print and json commands)"),
         )
         .arg(
             Arg::with_name("continue")
@@ -44,17 +47,26 @@ fn main() {
 
     let ledger_path = matches.value_of("ledger").unwrap();
 
-    if matches.is_present("precheck") {
-        if let Err(e) = verify_ledger(&ledger_path) {
-            eprintln!("ledger precheck failed, error: {:?} ", e);
-            exit(1);
-        }
-    }
+    let genesis_block = GenesisBlock::load(ledger_path).unwrap_or_else(|err| {
+        eprintln!(
+            "Failed to open ledger genesis_block at {}: {}",
+            ledger_path, err
+        );
+        exit(1);
+    });
 
-    let entries = match read_ledger(ledger_path, true) {
-        Ok(entries) => entries,
+    let blocktree = match Blocktree::open(ledger_path) {
+        Ok(blocktree) => blocktree,
         Err(err) => {
             eprintln!("Failed to open ledger at {}: {}", ledger_path, err);
+            exit(1);
+        }
+    };
+
+    let entries = match blocktree.read_ledger() {
+        Ok(entries) => entries,
+        Err(err) => {
+            eprintln!("Failed to read ledger at {}: {}", ledger_path, err);
             exit(1);
         }
     };
@@ -64,20 +76,23 @@ fn main() {
         None => <usize>::max_value(),
     };
 
+    let min_hashes = match matches.value_of("min-hashes") {
+        Some(hashes) => hashes
+            .parse()
+            .expect("please pass a number for --min-hashes"),
+        None => 0,
+    } as u64;
+
     match matches.subcommand() {
         ("print", _) => {
-            let entries = match read_ledger(ledger_path, true) {
-                Ok(entries) => entries,
-                Err(err) => {
-                    eprintln!("Failed to open ledger at {}: {}", ledger_path, err);
-                    exit(1);
-                }
-            };
             for (i, entry) in entries.enumerate() {
                 if i >= head {
                     break;
                 }
-                let entry = entry.unwrap();
+
+                if entry.num_hashes < min_hashes {
+                    continue;
+                }
                 println!("{:?}", entry);
             }
         }
@@ -87,66 +102,24 @@ fn main() {
                 if i >= head {
                     break;
                 }
-                let entry = entry.unwrap();
+
+                if entry.num_hashes < min_hashes {
+                    continue;
+                }
                 serde_json::to_writer(stdout(), &entry).expect("serialize");
                 stdout().write_all(b",\n").expect("newline");
             }
             stdout().write_all(b"\n]}\n").expect("close array");
         }
-        ("verify", _) => {
-            const NUM_GENESIS_ENTRIES: usize = 3;
-            if head < NUM_GENESIS_ENTRIES {
-                eprintln!(
-                    "verify requires at least {} entries to run",
-                    NUM_GENESIS_ENTRIES
-                );
+        ("verify", _) => match process_blocktree(&genesis_block, &blocktree, None) {
+            Ok((_bank_forks, bank_forks_info, _)) => {
+                println!("{:?}", bank_forks_info);
+            }
+            Err(err) => {
+                eprintln!("Ledger verification failed: {:?}", err);
                 exit(1);
             }
-            let bank = Bank::new_with_builtin_programs();
-            {
-                let genesis = match read_ledger(ledger_path, true) {
-                    Ok(entries) => entries,
-                    Err(err) => {
-                        eprintln!("Failed to open ledger at {}: {}", ledger_path, err);
-                        exit(1);
-                    }
-                };
-
-                let genesis = genesis.take(NUM_GENESIS_ENTRIES).map(|e| e.unwrap());
-                if let Err(e) = bank.process_ledger(genesis) {
-                    eprintln!("verify failed at genesis err: {:?}", e);
-                    if !matches.is_present("continue") {
-                        exit(1);
-                    }
-                }
-            }
-            let entries = entries.map(|e| e.unwrap());
-
-            let head = head - NUM_GENESIS_ENTRIES;
-
-            let mut last_id = bank.last_id();
-
-            for (i, entry) in entries.skip(NUM_GENESIS_ENTRIES).enumerate() {
-                if i >= head {
-                    break;
-                }
-
-                if !entry.verify(&last_id) {
-                    eprintln!("entry.verify() failed at entry[{}]", i + 2);
-                    if !matches.is_present("continue") {
-                        exit(1);
-                    }
-                }
-                last_id = entry.id;
-
-                if let Err(e) = bank.process_entry(&entry) {
-                    eprintln!("verify failed at entry[{}], err: {:?}", i + 2, e);
-                    if !matches.is_present("continue") {
-                        exit(1);
-                    }
-                }
-            }
-        }
+        },
         ("", _) => {
             eprintln!("{}", matches.usage());
             exit(1);

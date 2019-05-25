@@ -9,6 +9,7 @@ cd "$(dirname "$0")"/../..
 deployMethod=
 entrypointIp=
 numNodes=
+failOnValidatorBootupFailure=
 
 [[ -r deployConfig ]] || {
   echo deployConfig missing
@@ -25,7 +26,7 @@ missing() {
 [[ -n $deployMethod ]]   || missing deployMethod
 [[ -n $entrypointIp ]]   || missing entrypointIp
 [[ -n $numNodes ]]       || missing numNodes
-[[ -n $leaderRotation ]] || missing leaderRotation
+[[ -n $failOnValidatorBootupFailure ]] || missing failOnValidatorBootupFailure
 
 ledgerVerify=true
 validatorSanity=true
@@ -50,23 +51,13 @@ while [[ $1 = -o ]]; do
   esac
 done
 
+RUST_LOG="$1"
+export RUST_LOG=${RUST_LOG:-solana=info} # if RUST_LOG is unset, default to info
+
 source net/common.sh
 loadConfigFile
 
 case $deployMethod in
-snap)
-  PATH="/snap/bin:$PATH"
-  export USE_SNAP=1
-  entrypointRsyncUrl="$entrypointIp"
-
-  solana_bench_tps=solana.bench-tps
-  solana_ledger_tool=solana.ledger-tool
-  solana_keygen=solana.keygen
-
-  ledger=/var/snap/solana/current/config-local/bootstrap-leader-ledger
-  client_id=~/snap/solana/current/config/client-id.json
-
-  ;;
 local|tar)
   PATH="$HOME"/.cargo/bin:"$PATH"
   export USE_INSTALL=1
@@ -77,42 +68,55 @@ local|tar)
 
   entrypointRsyncUrl="$entrypointIp:~/solana"
 
-  solana_bench_tps=solana-bench-tps
+  solana_gossip=solana-gossip
   solana_ledger_tool=solana-ledger-tool
   solana_keygen=solana-keygen
 
   ledger=config-local/bootstrap-leader-ledger
-  client_id=config/client-id.json
+  client_id=config-local/client-id.json
   ;;
 *)
   echo "Unknown deployment method: $deployMethod"
   exit 1
 esac
 
+if $failOnValidatorBootupFailure; then
+  numSanityNodes="$numNodes"
+else
+  numSanityNodes=1
+  if $rejectExtraNodes; then
+    echo "rejectExtraNodes cannot be used with failOnValidatorBootupFailure"
+    exit 1
+  fi
+fi
 
-echo "--- $entrypointIp: wallet sanity"
-(
-  set -x
-  scripts/wallet-sanity.sh "$entrypointIp:8001"
-)
-
-echo "+++ $entrypointIp: node count ($numNodes expected)"
+echo "+++ $entrypointIp: node count ($numSanityNodes expected)"
 (
   set -x
   $solana_keygen -o "$client_id"
 
-  maybeRejectExtraNodes=
+  nodeArg="num-nodes"
   if $rejectExtraNodes; then
-    maybeRejectExtraNodes="--reject-extra-nodes"
+    nodeArg="num-nodes-exactly"
   fi
 
-  $solana_bench_tps \
-    --network "$entrypointIp:8001" \
-    --drone "$entrypointIp:9900" \
-    --identity "$client_id" \
-    --num-nodes "$numNodes" \
-    $maybeRejectExtraNodes \
-    --converge-only
+  timeout 2m $solana_gossip --entrypoint "$entrypointIp:8001" \
+    spy --$nodeArg "$numSanityNodes" \
+)
+
+echo "--- RPC API: getTransactionCount"
+(
+  set -x
+  curl --retry 5 --retry-delay 2 --retry-connrefused \
+    -X POST -H 'Content-Type: application/json' \
+    -d '{"jsonrpc":"2.0","id":1, "method":"getTransactionCount"}' \
+    http://"$entrypointIp":8899
+)
+
+echo "--- $entrypointIp: wallet sanity"
+(
+  set -x
+  scripts/wallet-sanity.sh --url http://"$entrypointIp":8899
 )
 
 echo "--- $entrypointIp: verify ledger"
@@ -139,7 +143,7 @@ echo "--- $entrypointIp: validator sanity"
 if $validatorSanity; then
   (
     set -x -o pipefail
-    timeout 10s ./multinode-demo/fullnode-x.sh \
+    timeout 10s ./multinode-demo/validator-x.sh --stake 0 \
       "$entrypointRsyncUrl" \
       "$entrypointIp:8001" 2>&1 | tee validator-sanity.log
   ) || {

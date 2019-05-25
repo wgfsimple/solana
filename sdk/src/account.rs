@@ -1,32 +1,57 @@
 use crate::pubkey::Pubkey;
+use std::{cmp, fmt};
 
-/// An Account with userdata that is stored on chain
+/// An Account with data that is stored on chain
 #[repr(C)]
-#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+#[derive(Serialize, Deserialize, Clone, Default, Eq, PartialEq)]
 pub struct Account {
-    /// tokens in the account
-    pub tokens: u64,
+    /// lamports in the account
+    pub lamports: u64,
     /// data held in this account
-    pub userdata: Vec<u8>,
-    /// the program that owns this account
+    pub data: Vec<u8>,
+    /// the program that owns this account. If executable, the program that loads this account.
     pub owner: Pubkey,
-    /// this account's userdata contains a loaded program (and is now read-only)
+    /// this account's data contains a loaded program (and is now read-only)
     pub executable: bool,
-    /// the loader for this account
-    /// (Pubkey::default() if the account is not executable and thus was never 'loaded')
-    pub loader: Pubkey,
+}
+
+impl fmt::Debug for Account {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let data_len = cmp::min(64, self.data.len());
+        let data_str = if data_len > 0 {
+            format!(" data: {}", hex::encode(self.data[..data_len].to_vec()))
+        } else {
+            "".to_string()
+        };
+        write!(
+            f,
+            "Account {{ lamports: {} data.len: {} owner: {} executable: {}{} }}",
+            self.lamports,
+            self.data.len(),
+            self.owner,
+            self.executable,
+            data_str,
+        )
+    }
 }
 
 impl Account {
     // TODO do we want to add executable and leader_owner even though they should always be false/default?
-    pub fn new(tokens: u64, space: usize, owner: Pubkey) -> Account {
+    pub fn new(lamports: u64, space: usize, owner: &Pubkey) -> Account {
         Account {
-            tokens,
-            userdata: vec![0u8; space],
-            owner,
+            lamports,
+            data: vec![0u8; space],
+            owner: *owner,
             executable: false,
-            loader: Pubkey::default(),
         }
+    }
+
+    pub fn deserialize_data<T: serde::de::DeserializeOwned>(&self) -> Result<T, bincode::Error> {
+        bincode::deserialize(&self.data)
+    }
+
+    pub fn serialize_data<T: serde::Serialize>(&mut self, state: &T) -> Result<(), bincode::Error> {
+        bincode::serialize_into(&mut self.data[..], state)
     }
 }
 

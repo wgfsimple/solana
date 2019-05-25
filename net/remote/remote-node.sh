@@ -6,14 +6,22 @@ cd "$(dirname "$0")"/../..
 set -x
 deployMethod="$1"
 nodeType="$2"
-publicNetwork="$3"
-entrypointIp="$4"
-numNodes="$5"
-RUST_LOG="$6"
-skipSetup="$7"
-leaderRotation="$8"
+entrypointIp="$3"
+numNodes="$4"
+RUST_LOG="$5"
+skipSetup="$6"
+failOnValidatorBootupFailure="$7"
+genesisOptions="$8"
 set +x
-export RUST_LOG=${RUST_LOG:-solana=warn} # if RUST_LOG is unset, default to warn
+export RUST_LOG
+
+# Use a very large stake (relative to the default multinode-demo/ stake of 43)
+# for the testnet validators setup by net/.  This make it less likely that
+# low-staked ephemeral validator a random user may attach to testnet will cause
+# trouble
+#
+# Ref: https://github.com/solana-labs/solana/issues/3798
+stake=424243
 
 missing() {
   echo "Error: $1 not specified"
@@ -22,108 +30,26 @@ missing() {
 
 [[ -n $deployMethod ]]  || missing deployMethod
 [[ -n $nodeType ]]      || missing nodeType
-[[ -n $publicNetwork ]] || missing publicNetwork
 [[ -n $entrypointIp ]]  || missing entrypointIp
 [[ -n $numNodes ]]      || missing numNodes
 [[ -n $skipSetup ]]     || missing skipSetup
-[[ -n $leaderRotation ]] || missing leaderRotation
+[[ -n $failOnValidatorBootupFailure ]] || missing failOnValidatorBootupFailure
 
 cat > deployConfig <<EOF
 deployMethod="$deployMethod"
 entrypointIp="$entrypointIp"
 numNodes="$numNodes"
-leaderRotation=$leaderRotation
+failOnValidatorBootupFailure=$failOnValidatorBootupFailure
+genesisOptions="$genesisOptions"
 EOF
 
 source net/common.sh
 loadConfigFile
 
-if [[ $publicNetwork = true ]]; then
-  setupArgs="-p"
-else
-  setupArgs="-l"
-fi
-
 case $deployMethod in
-snap)
-  SECONDS=0
-
-  if [[ $skipSetup = true ]]; then
-    for configDir in /var/snap/solana/current/config{,-local}; do
-      if [[ ! -d $configDir ]]; then
-        echo Error: not a directory: $configDir
-        exit 1
-      fi
-    done
-    (
-      set -x
-      sudo rm -rf /saved-node-config
-      sudo mkdir /saved-node-config
-      sudo mv /var/snap/solana/current/config{,-local} /saved-node-config
-    )
-  fi
-
-  [[ $nodeType = bootstrap-leader ]] ||
-    net/scripts/rsync-retry.sh -vPrc "$entrypointIp:~/solana/solana.snap" .
-  if snap list solana; then
-    sudo snap remove solana
-  fi
-  sudo snap install solana.snap --devmode --dangerous
-
-  if [[ $skipSetup = true ]]; then
-    (
-      set -x
-      sudo rm -rf /var/snap/solana/current/config{,-local}
-      sudo mv /saved-node-config/* /var/snap/solana/current/
-      sudo rm -rf /saved-node-config
-    )
-  fi
-
-  # shellcheck disable=SC2089
-  commonNodeConfig="\
-    entrypoint-ip=\"$entrypointIp\" \
-    metrics-config=\"$SOLANA_METRICS_CONFIG\" \
-    rust-log=\"$RUST_LOG\" \
-    setup-args=\"$setupArgs\" \
-    skip-setup=$skipSetup \
-    leader-rotation=\"$leaderRotation\" \
-  "
-
-  if [[ -e /dev/nvidia0 ]]; then
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-    echo
-    echo "WARNING: GPU detected by snap builds to not support CUDA."
-    echo "         Consider using instances with a GPU to reduce cost."
-    echo
-    echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-  fi
-
-  if [[ $nodeType = bootstrap-leader ]]; then
-    nodeConfig="mode=bootstrap-leader+drone $commonNodeConfig"
-    ln -sf -T /var/snap/solana/current/bootstrap-leader/current fullnode.log
-    ln -sf -T /var/snap/solana/current/drone/current drone.log
-  else
-    nodeConfig="mode=fullnode $commonNodeConfig"
-    ln -sf -T /var/snap/solana/current/fullnode/current fullnode.log
-  fi
-
-  logmarker="solana deploy $(date)/$RANDOM"
-  logger "$logmarker"
-
-  # shellcheck disable=SC2086,SC2090 # Don't want to double quote "$nodeConfig"
-  sudo snap set solana $nodeConfig
-  snap info solana
-  sudo snap get solana
-  echo Slight delay to get more syslog output
-  sleep 2
-  sudo grep -Pzo "$logmarker(.|\\n)*" /var/log/syslog
-
-  echo "Succeeded in ${SECONDS} seconds"
-  ;;
 local|tar)
   PATH="$HOME"/.cargo/bin:"$PATH"
   export USE_INSTALL=1
-  export RUST_LOG
   export SOLANA_METRICS_DISPLAY_HOSTNAME=1
 
   # Setup `/var/snap/solana/current` symlink so rsyncing the genesis
@@ -136,46 +62,96 @@ local|tar)
   # shellcheck source=/dev/null
   source ./target/perf-libs/env.sh
 
-  scripts/oom-monitor.sh  > oom-monitor.log 2>&1 &
+  (
+    sudo scripts/oom-monitor.sh
+  ) > oom-monitor.log 2>&1 &
+  echo $! > oom-monitor.pid
   scripts/net-stats.sh  > net-stats.log 2>&1 &
-
-  maybeNoLeaderRotation=
-  if ! $leaderRotation; then
-    maybeNoLeaderRotation="--no-leader-rotation"
-  fi
-
+  echo $! > net-stats.pid
 
   case $nodeType in
   bootstrap-leader)
-    if [[ -e /dev/nvidia0 && -x ~/.cargo/bin/solana-fullnode-cuda ]]; then
-      echo Selecting solana-fullnode-cuda
+    if [[ -e /dev/nvidia0 && -x ~/.cargo/bin/solana-validator-cuda ]]; then
+      echo Selecting solana-validator-cuda
       export SOLANA_CUDA=1
     fi
+    set -x
     if [[ $skipSetup != true ]]; then
-      ./multinode-demo/setup.sh -t bootstrap-leader $setupArgs
+      args=(--bootstrap-leader-lamports "$stake")
+      # shellcheck disable=SC2206 # Do not want to quote $genesisOptions
+      args+=($genesisOptions)
+      ./multinode-demo/setup.sh "${args[@]}"
     fi
     ./multinode-demo/drone.sh > drone.log 2>&1 &
-    ./multinode-demo/bootstrap-leader.sh $maybeNoLeaderRotation > bootstrap-leader.log 2>&1 &
-    ln -sTf bootstrap-leader.log fullnode.log
+
+    args=(
+      --enable-rpc-exit
+      --gossip-port "$entrypointIp":8001
+    )
+
+    ./multinode-demo/validator.sh --bootstrap-leader "${args[@]}" > fullnode.log 2>&1 &
     ;;
-  fullnode)
+  validator|blockstreamer)
     net/scripts/rsync-retry.sh -vPrc "$entrypointIp":~/.cargo/bin/ ~/.cargo/bin/
 
-    if [[ -e /dev/nvidia0 && -x ~/.cargo/bin/solana-fullnode-cuda ]]; then
-      echo Selecting solana-fullnode-cuda
+    if [[ -e /dev/nvidia0 && -x ~/.cargo/bin/solana-validator-cuda ]]; then
+      echo Selecting solana-validator-cuda
       export SOLANA_CUDA=1
     fi
 
-    if [[ $skipSetup != true ]]; then
-      ./multinode-demo/setup.sh -t fullnode $setupArgs
+    args=(
+      "$entrypointIp":~/solana "$entrypointIp:8001"
+      --gossip-port 8001
+      --rpc-port 8899
+    )
+    if [[ $nodeType = blockstreamer ]]; then
+      args+=(
+        --blockstream /tmp/solana-blockstream.sock
+        --no-voting
+        --stake 0
+      )
+    else
+      args+=(--stake "$stake")
+      args+=(--enable-rpc-exit)
     fi
-    ./multinode-demo/fullnode.sh $maybeNoLeaderRotation "$entrypointIp":~/solana "$entrypointIp:8001" > fullnode.log 2>&1 &
+
+    set -x
+    if [[ $skipSetup != true ]]; then
+      ./multinode-demo/clear-config.sh
+    fi
+
+    if [[ $nodeType = blockstreamer ]]; then
+      # Sneak the mint-keypair.json from the bootstrap leader and run another drone
+      # with it on the blockstreamer node.  Typically the blockstreamer node has
+      # a static IP/DNS name for hosting the blockexplorer web app, and is
+      # a location that somebody would expect to be able to airdrop from
+      scp "$entrypointIp":~/solana/config-local/mint-keypair.json config-local/
+      ./multinode-demo/drone.sh > drone.log 2>&1 &
+
+      export BLOCKEXPLORER_GEOIP_WHITELIST=$PWD/net/config/geoip.yml
+      npm install @solana/blockexplorer@1
+      npx solana-blockexplorer > blockexplorer.log 2>&1 &
+
+      # Confirm the blockexplorer is accessible
+      curl --head --retry 3 --retry-connrefused http://localhost:5000/
+
+      # Redirect port 80 to port 5000
+      sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
+      sudo iptables -A INPUT -p tcp --dport 5000 -j ACCEPT
+      sudo iptables -A PREROUTING -t nat -p tcp --dport 80 -j REDIRECT --to-port 5000
+
+      # Confirm the blockexplorer is now globally accessible
+      curl --head "$(curl ifconfig.io)"
+    fi
+
+    ./multinode-demo/validator.sh "${args[@]}" > fullnode.log 2>&1 &
     ;;
   *)
     echo "Error: unknown node type: $nodeType"
     exit 1
     ;;
   esac
+  disown
   ;;
 *)
   echo "Unknown deployment method: $deployMethod"

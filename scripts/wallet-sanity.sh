@@ -9,10 +9,10 @@ cd "$(dirname "$0")"/..
 # shellcheck source=multinode-demo/common.sh
 source multinode-demo/common.sh
 
-if [[ -z $1 ]]; then # no network argument, use default
-  entrypoint=()
+if [[ -z $1 ]]; then # no network argument, use localhost by default
+  entrypoint=(--url http://127.0.0.1:8899)
 else
-  entrypoint=(-n "$1")
+  entrypoint=("$@")
 fi
 
 # Tokens transferred to this address are lost forever...
@@ -45,32 +45,30 @@ pay_and_confirm() {
 
 $solana_keygen
 
-leader_readiness=false
+node_readiness=false
 timeout=60
 while [[ $timeout -gt 0 ]]; do
-  expected_output="Leader ready"
-  exec 42>&1
-  output=$($solana_wallet "${entrypoint[@]}" get-transaction-count | tee >(cat - >&42))
-  if [[ $output -gt 0 ]]; then
-    leader_readiness=true
+  output=$($solana_wallet "${entrypoint[@]}" get-transaction-count)
+  if [[ -n $output ]]; then
+    node_readiness=true
     break
   fi
   sleep 2
   (( timeout=timeout-2 ))
 done
-if ! "$leader_readiness"; then
-  echo "Timed out waiting for leader"
+if ! "$node_readiness"; then
+  echo "Timed out waiting for cluster to start"
   exit 1
 fi
 
 $solana_wallet "${entrypoint[@]}" address
-check_balance_output "No account found" "Your balance is: 0"
+check_balance_output "0 lamports"
 $solana_wallet "${entrypoint[@]}" airdrop 60
-check_balance_output "Your balance is: 60"
+check_balance_output "60 lamports"
 $solana_wallet "${entrypoint[@]}" airdrop 40
-check_balance_output "Your balance is: 100"
+check_balance_output "100 lamports"
 pay_and_confirm $garbage_address 99
-check_balance_output "Your balance is: 1"
+check_balance_output "1 lamport"
 
 echo PASS
 exit 0

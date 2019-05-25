@@ -3,17 +3,17 @@
 # Utilities for working with EC2 instances
 #
 
-zone=
-region=
-
-cloud_SetZone() {
-  zone="$1"
-  # AWS region is zone with the last character removed
-  region="${zone:0:$((${#zone} - 1))}"
+cloud_DefaultZone() {
+  echo "us-east-1b"
 }
 
-# Set the default zone
-cloud_SetZone "us-east-1b"
+# AWS region is zone with the last character removed
+__cloud_GetRegion() {
+  declare zone="$1"
+  # AWS region is zone with the last character removed
+  declare region="${zone:0:$((${#zone} - 1))}"
+  echo "$region"
+}
 
 # sshPrivateKey should be globally defined whenever this function is called.
 #
@@ -49,18 +49,23 @@ __cloud_FindInstances() {
   declare filter="$1"
 
   instances=()
-  declare name publicIp privateIp
-  while read -r name publicIp privateIp; do
-    printf "%-30s | publicIp=%-16s privateIp=%s\n" "$name" "$publicIp" "$privateIp"
-    instances+=("$name:$publicIp:$privateIp")
-  done < <(aws ec2 describe-instances \
-             --region "$region" \
-             --filters \
-               "Name=tag:name,Values=$filter" \
-               "Name=instance-state-name,Values=pending,running" \
-             --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress]" \
-             --output text
-    )
+  declare -a regions=("us-east-1" "us-east-2" "us-west-1" "us-west-2" "sa-east-1" "ap-northeast-2" \
+   "ap-northeast-1" "ap-southeast-2" "ap-southeast-1" "ap-south-1" "eu-west-1" "eu-west-2" "eu-central-1" "ca-central-1")
+  for region in "${regions[@]}"
+  do
+    declare name publicIp privateIp
+    while read -r name publicIp privateIp zone; do
+      printf "%-30s | publicIp=%-16s privateIp=%s zone=%s\n" "$name" "$publicIp" "$privateIp" "$zone"
+      instances+=("$name:$publicIp:$privateIp:$zone")
+    done < <(aws ec2 describe-instances \
+              --region "$region" \
+              --filters \
+                "Name=tag:name,Values=$filter" \
+                "Name=instance-state-name,Values=pending,running" \
+              --query "Reservations[].Instances[].[InstanceId,PublicIpAddress,PrivateIpAddress,Placement.AvailabilityZone]" \
+              --output text \
+      )
+  done
 }
 
 #
@@ -101,6 +106,31 @@ cloud_FindInstance() {
   __cloud_FindInstances "$name"
 }
 
+#
+# cloud_Initialize [networkName]
+#
+# Perform one-time initialization that may be required for the given testnet.
+#
+# networkName   - unique name of this testnet
+#
+# This function will be called before |cloud_CreateInstances|
+cloud_Initialize() {
+  declare networkName="$1"
+  declare zone="$2"
+  declare region=
+  region=$(__cloud_GetRegion "$zone")
+
+  __cloud_SshPrivateKeyCheck
+  aws ec2 delete-key-pair --region "$region" --key-name "$networkName"
+  aws ec2 import-key-pair --region "$region" --key-name "$networkName" \
+    --public-key-material file://"${sshPrivateKey}".pub
+
+  declare rules
+  rules=$(cat "$(dirname "${BASH_SOURCE[0]}")"/ec2-security-group-config.json)
+  aws ec2 delete-security-group --region "$region" --group-name "$networkName" || true
+  aws ec2 create-security-group --region "$region" --group-name "$networkName" --description "Created automatically by $0"
+  aws ec2 authorize-security-group-ingress --output table --region "$region" --group-name "$networkName" --cli-input-json "$rules"
+}
 
 #
 # cloud_CreateInstances [networkName] [namePrefix] [numNodes] [imageName]
@@ -125,19 +155,87 @@ cloud_CreateInstances() {
   declare networkName="$1"
   declare namePrefix="$2"
   declare numNodes="$3"
-  declare imageName="$4"
+  declare enableGpu="$4"
   declare machineType="$5"
-  declare optionalBootDiskSize="$6"
-  declare optionalStartupScript="$7"
-  declare optionalAddress="$8"
+  declare zone="$6"
+  declare optionalBootDiskSize="$7"
+  declare optionalStartupScript="$8"
+  declare optionalAddress="$9"
+  declare region=
+  region=$(__cloud_GetRegion "$zone")
 
-  __cloud_SshPrivateKeyCheck
-  (
-    set -x
-    aws ec2 delete-key-pair --region "$region" --key-name "$networkName"
-    aws ec2 import-key-pair --region "$region" --key-name "$networkName" \
-      --public-key-material file://"${sshPrivateKey}".pub
-  )
+  if $enableGpu; then
+    #
+    # Custom Ubuntu 18.04 LTS image with CUDA 9.2 and CUDA 10.0 installed
+    #
+    # TODO: Unfortunately these AMIs are not public.  When this becomes an issue,
+    # use the stock Ubuntu 18.04 image and programmatically install CUDA after the
+    # instance boots
+    #
+    case $region in
+    us-east-1)
+      imageName="ami-0a8bd6fb204473f78"
+      ;;
+    us-west-1)
+      imageName="ami-07011f0795513c59d"
+      ;;
+    us-west-2)
+      imageName="ami-0a11ef42b62b82b68"
+      ;;
+    *)
+      usage "Unsupported region: $region"
+      ;;
+    esac
+  else
+    # Select an upstream Ubuntu 18.04 AMI from https://cloud-images.ubuntu.com/locator/ec2/
+    case $region in
+    us-east-1)
+      imageName="ami-0fba9b33b5304d8b4"
+      ;;
+    us-east-2)
+      imageName="ami-0e04554247365d806"
+      ;;
+    us-west-1)
+      imageName="ami-07390b6ff5934a238"
+      ;;
+    us-west-2)
+      imageName="ami-03804ed633fe58109"
+      ;;
+    sa-east-1)
+      imageName="ami-0f1678b6f63a0f923"
+      ;;
+    ap-northeast-2)
+      imageName="ami-0695e34e31339c3ff"
+      ;;
+    ap-northeast-1)
+      imageName="ami-003371bfa26192744"
+      ;;
+    ap-southeast-2)
+      imageName="ami-0401c9e2f645b5557"
+      ;;
+    ap-southeast-1)
+      imageName="ami-08050c889a630f1bd"
+      ;;
+    ap-south-1)
+      imageName="ami-04184c12996409633"
+      ;;
+    eu-central-1)
+      imageName="ami-054e21e355db24124"
+      ;;
+    eu-west-1)
+      imageName="ami-0727f3c2d4b0226d5"
+      ;;
+    eu-west-2)
+      imageName="ami-068f09e337d7da0c4"
+      ;;
+    ca-central-1)
+      imageName="ami-06ed08059bdc08fc9"
+      ;;
+    *)
+      usage "Unsupported region: $region"
+      ;;
+    esac
+  fi
 
   declare -a args
   args=(
@@ -145,7 +243,7 @@ cloud_CreateInstances() {
     --count "$numNodes"
     --region "$region"
     --placement "AvailabilityZone=$zone"
-    --security-groups testnet
+    --security-groups "$networkName"
     --image-id "$imageName"
     --instance-type "$machineType"
     --tag-specifications "ResourceType=instance,Tags=[{Key=name,Value=$namePrefix}]"
@@ -170,7 +268,7 @@ cloud_CreateInstances() {
 
   (
     set -x
-    aws ec2 run-instances "${args[@]}"
+    aws ec2 run-instances --output table "${args[@]}"
   )
 
   if [[ -n $optionalAddress ]]; then
@@ -180,12 +278,14 @@ cloud_CreateInstances() {
     fi
 
     declare instanceId
-    IFS=: read -r instanceId _ < <(echo "${instances[0]}")
+    IFS=: read -r instanceId publicIp privateIp zone < <(echo "${instances[0]}")
     (
       set -x
       # TODO: Poll that the instance has moved to the 'running' state instead of
       #       blindly sleeping for 30 seconds...
       sleep 30
+      declare region=
+      region=$(__cloud_GetRegion "$zone")
       aws ec2 associate-address \
         --instance-id "$instanceId" \
         --region "$region" \
@@ -204,13 +304,56 @@ cloud_DeleteInstances() {
     echo No instances to delete
     return
   fi
-  declare names=("${instances[@]/:*/}")
-  (
-    set -x
-    aws ec2 terminate-instances --region "$region" --instance-ids "${names[@]}"
-  )
+
+  # Terminate the instances
+  for instance in "${instances[@]}"; do
+    declare name="${instance/:*/}"
+    declare zone="${instance/*:/}"
+    declare region=
+    region=$(__cloud_GetRegion "$zone")
+    (
+      set -x
+      aws ec2 terminate-instances --output table --region "$region" --instance-ids "$name"
+    )
+  done
+
+  # Wait until the instances are terminated
+  for instance in "${instances[@]}"; do
+    declare name="${instance/:*/}"
+    declare zone="${instance/*:/}"
+    declare region=
+    region=$(__cloud_GetRegion "$zone")
+    while true; do
+      declare instanceState
+      instanceState=$(\
+        aws ec2 describe-instances \
+          --region "$region" \
+          --instance-ids "$name" \
+          --query "Reservations[].Instances[].State.Name" \
+          --output text \
+      )
+      echo "$name: $instanceState"
+      if [[ $instanceState = terminated ]]; then
+        break;
+      fi
+      sleep 2
+    done
+  done
 }
 
+#
+# cloud_WaitForInstanceReady [instanceName] [instanceIp] [instanceZone] [timeout]
+#
+# Return once the newly created VM instance is responding.  This function is cloud-provider specific.
+#
+cloud_WaitForInstanceReady() {
+  declare instanceName="$1"
+  declare instanceIp="$2"
+#  declare instanceZone="$3"  # unused
+  declare timeout="$4"
+
+  timeout "${timeout}"s bash -c "set -o pipefail; until ping -c 3 $instanceIp | tr - _; do echo .; done"
+}
 
 #
 # cloud_FetchFile [instanceName] [publicIp] [remoteFile] [localFile]

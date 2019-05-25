@@ -32,7 +32,7 @@ if [[ ! -r criterion-$machine-$version.md ]]; then
 fi
 
 # Install LLVM
-version=v0.0.7
+version=v0.0.9
 if [[ ! -f llvm-native-$machine-$version.md ]]; then
   (
     filename=solana-llvm-$machine.tar.bz2
@@ -50,6 +50,58 @@ if [[ ! -f llvm-native-$machine-$version.md ]]; then
   exitcode=$?
   if [[ $exitcode -ne 0 ]]; then
     rm -rf llvm-native
+    exit 1
+  fi
+fi
+
+# Install Rust-BPF
+version=v0.1.0
+if [[ ! -f rust-bpf-$machine-$version.md ]]; then
+  (
+    filename=solana-rust-bpf-$machine.tar.bz2
+
+    set -ex
+    rm -rf rust-bpf
+    rm -rf rust-bpf-$machine-*
+    mkdir -p rust-bpf
+    pushd rust-bpf
+    wget --progress=dot:giga https://github.com/solana-labs/rust-bpf-builder/releases/download/$version/$filename
+    tar -jxf $filename
+    rm -rf $filename
+    popd
+
+    set -ex
+    ./rust-bpf/bin/rustc --print sysroot
+
+    set +e
+    rustup toolchain uninstall bpf
+    set -e
+    rustup toolchain link bpf rust-bpf
+
+    echo "https://github.com/solana-labs/rust-bpf-builder/releases/tag/$version" > rust-bpf-$machine-$version.md
+  )
+  exitcode=$?
+  if [[ $exitcode -ne 0 ]]; then
+    rm -rf rust-bpf
+    exit 1
+  fi
+fi
+
+# Install Rust-BPF Sysroot sources
+version=v0.2
+if [[ ! -f rust-bpf-sysroot-$version.md ]]; then
+  (
+    filename=solana-rust-bpf-sysroot.tar.bz2
+
+    set -ex
+    rm -rf rust-bpf-sysroot*
+    git clone --recursive --single-branch --branch $version https://github.com/solana-labs/rust-bpf-sysroot.git
+
+    echo "git clone --recursive --single-branch --branch $version https://github.com/solana-labs/rust-bpf-sysroot.git" > rust-bpf-sysroot-$version.md
+  )
+  exitcode=$?
+  if [[ $exitcode -ne 0 ]]; then
+    rm -rf rust-bpf-sysroot
     exit 1
   fi
 fi

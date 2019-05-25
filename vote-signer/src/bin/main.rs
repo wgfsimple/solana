@@ -1,21 +1,16 @@
-#[macro_use]
-extern crate clap;
-extern crate log;
-extern crate solana_metrics;
-extern crate solana_sdk;
-extern crate solana_vote_signer;
-
-use clap::{App, Arg};
+use clap::{crate_description, crate_name, crate_version, App, Arg};
 use solana_vote_signer::rpc::VoteSignerRpcService;
 use std::error;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-
+use std::sync::atomic::AtomicBool;
+use std::sync::Arc;
 pub const RPC_PORT: u16 = 8989;
 
 fn main() -> Result<(), Box<error::Error>> {
     solana_metrics::set_panic_hook("vote-signer");
 
-    let matches = App::new("vote-signer")
+    let matches = App::new(crate_name!())
+        .about(crate_description!())
         .version(crate_version!())
         .arg(
             Arg::with_name("port")
@@ -34,10 +29,12 @@ fn main() -> Result<(), Box<error::Error>> {
         RPC_PORT
     };
 
-    let service =
-        VoteSignerRpcService::new(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port));
+    let exit = Arc::new(AtomicBool::new(false));
+    let service = VoteSignerRpcService::new(
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port),
+        &exit,
+    );
 
     service.join().unwrap();
-
     Ok(())
 }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -e
 cd "$(dirname "$0")/.."
-
+source ci/semver_bash/semver.sh
 
 # List of internal crates to publish
 #
@@ -11,37 +11,43 @@ cd "$(dirname "$0")/.."
 # here. (TODO: figure the crate ordering dynamically)
 #
 CRATES=(
+  kvstore
   logger
   netutil
   sdk
   keygen
   metrics
+  client
   drone
-  programs/native/{budget,bpf_loader,lua_loader,native_loader,noop,system,vote}
-  .
-  fullnode
+  programs/{budget_api,config_api,stake_api,storage_api,token_api,vote_api,exchange_api}
+  programs/{vote_program,budget_program,bpf_loader,config_program,exchange_program,failure_program}
+  programs/{noop_program,stake_program,storage_program,token_program}
+  runtime
+  vote-signer
+  core
+  validator
   genesis
+  gossip
   ledger-tool
   wallet
+  install
 )
 
-
-maybePackage="echo Package skipped"
-maybePublish="echo Publish skipped"
-
 # Only package/publish if this is a tagged release
-if [[ -n $BUILDKITE_TAG && -n $TRIGGERED_BUILDKITE_TAG ]]; then
-  maybePackage="cargo package"
+[[ -n $TRIGGERED_BUILDKITE_TAG ]] || {
+  echo TRIGGERED_BUILDKITE_TAG unset, skipped
+  exit 0
+}
 
-  # Only publish if there's no human around
-  if [[ -n $CI ]]; then
-    maybePublish="cargo publish --token $CRATES_IO_TOKEN"
-    if [[ -z "$CRATES_IO_TOKEN" ]]; then
-      echo CRATES_IO_TOKEN undefined
-      exit 1
-    fi
-  fi
-fi
+semverParseInto "$TRIGGERED_BUILDKITE_TAG" MAJOR MINOR PATCH SPECIAL
+expectedCrateVersion="$MAJOR.$MINOR.$PATCH$SPECIAL"
+
+[[ -n "$CRATES_IO_TOKEN" ]] || {
+  echo CRATES_IO_TOKEN undefined
+  exit 1
+}
+
+cargoCommand="cargo publish --token $CRATES_IO_TOKEN"
 
 for crate in "${CRATES[@]}"; do
   if [[ ! -r $crate/Cargo.toml ]]; then
@@ -49,10 +55,18 @@ for crate in "${CRATES[@]}"; do
     exit 1
   fi
   echo "-- $crate"
-  # TODO: Ensure the published version matches the contents of BUILDKITE_TAG
+  grep -q "^version = \"$expectedCrateVersion\"$" "$crate"/Cargo.toml || {
+    echo "Error: $crate/Cargo.toml version is not $expectedCrateVersion"
+    exit 1
+  }
+
   (
     set -x
-    ci/docker-run.sh rust bash -exc "cd $crate; $maybePackage; $maybePublish"
+    # TODO: the rocksdb package does not build with the stock rust docker image,
+    # so use the solana rust docker image until this is resolved upstream
+    source ci/rust-version.sh
+    ci/docker-run.sh "$rust_stable_docker_image" bash -exc "cd $crate; $cargoCommand"
+    #ci/docker-run.sh rust bash -exc "cd $crate; $cargoCommand"
   )
 done
 

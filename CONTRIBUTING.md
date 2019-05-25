@@ -8,6 +8,56 @@ don't agree with a convention, submit a PR patching this document and let's disc
 the PR is accepted, *all* code should be updated as soon as possible to reflect the new
 conventions.
 
+Pull Requests
+---
+
+Small, frequent PRs are much preferred to large, infrequent ones. A large PR is difficult
+to review, can block others from making progress, and can quickly get its author into
+"rebase hell". A large PR oftentimes arises when one change requires another, which requires
+another, and then another. When you notice those dependencies, put the fix into a commit of
+its own, then checkout a new branch, and cherrypick it. Open a PR to start the review
+process and then jump back to your original branch to keep making progress. Once the commit
+is merged, you can use git-rebase to purge it from your original branch.
+
+```bash
+$ git pull --rebase upstream master
+```
+
+### How big is too big?
+
+If there are no functional changes, PRs can be very large and that's no problem. If,
+however, your changes are making meaningful changes or additions, then about 1,000 lines of
+changes is about the most you should ask a Solana maintainer to review.
+
+### Should I send small PRs as I develop large, new components?
+
+Add only code to the codebase that is ready to be deployed. If you are building a large
+library, consider developing it in a separate git repository. When it is ready to be
+integrated, the Solana maintainers will work with you to decide on a path forward. Smaller
+libraries may be copied in whereas very large ones may be pulled in with a package manager.
+
+### When will my PR be reviewed?
+
+PRs are typically reviewed and merged in under 7 days. If your PR has been open for longer,
+it's a strong indicator that the reviewers aren't confident the change meets the quality
+standards of the codebase. You might consider closing it and coming back with smaller PRs
+and longer descriptions detailing what problem it solves and how it solves it.
+
+Draft Pull Requests
+---
+
+If you want early feedback on your PR, use GitHub's "Draft Pull Request"
+mechanism. Draft PRs are a convenient way to collaborate with the Solana
+maintainers without triggering notifications as you make changes. When you feel
+your PR is ready for a broader audience, you can transition your draft PR to a
+standard PR with the click of a button.
+
+Do not add reviewers to draft PRs.  GitHub doesn't automatically clear approvals
+when you click "Ready for Review", so a review that meant "I approve of the
+direction" suddenly has the appearance of "I approve of these changes." Instead,
+add a comment that mentions the usernames that you would like a review from. Ask
+explicitly what you would like feedback on.
+
 Rust coding conventions
 ---
 
@@ -46,24 +96,23 @@ understood. Avoid introducing new 3-letter terms, which can be confused with 3-l
 [Terms currently in use](book/src/terminology.md)
 
 
-Proposing architectural changes
+Design Proposals
 ---
 
 Solana's architecture is described by a book generated from markdown files in
 the `book/src/` directory, maintained by an *editor* (currently @garious). To
-change the architecture, you'll need to at least propose a change the content
-under the [Proposed
-Changes](https://solana-labs.github.io/solana/proposals.html) chapter. Here's
-the full process:
+add a design proposal, you'll need to at least propose a change the content
+under the [Accepted Design
+Proposals](https://solana-labs.github.io/book-edge/proposals.html) chapter.
+Here's the full process:
 
-1. Propose to a change to the architecture by creating a PR that adds a
-   markdown document to the directory `book/src/` and references it from the
-   [table of contents](book/src/SUMMARY.md). Add the editor and any relevant
-   *maintainers* to the PR review.
+1. Propose a design by creating a PR that adds a markdown document to the
+   directory `book/src/` and references it from the [table of
+   contents](book/src/SUMMARY.md). Add any relevant *maintainers* to the PR review.
 2. The PR being merged indicates your proposed change was accepted and that the
-   editor and maintainers support your plan of attack.
+   maintainers support your plan of attack.
 3. Submit PRs that implement the proposal. When the implementation reveals the
-   need for tweaks to the architecture, be sure to update the proposal and have
+   need for tweaks to the proposal, be sure to update the proposal and have
    that change reviewed by the same people as in step 1.
-4. Once the implementation is complete, the editor will then work to integrate
-   the document into the book.
+4. Once the implementation is complete, submit a PR that moves the link from
+   the Accepted Proposals to the Implemented Proposals section.

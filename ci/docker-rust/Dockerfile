@@ -1,6 +1,6 @@
 # Note: when the rust version is changed also modify
 # ci/buildkite.yml to pick up the new image tag
-FROM rust:1.31.0
+FROM rust:1.34.0
 
 RUN set -x \
  && apt update \
@@ -17,12 +17,15 @@ RUN set -x \
       lcov \
       libclang-common-7-dev \
       llvm-7 \
+      mscgen \
       rsync \
       sudo \
       \
+ && rm -rf /var/lib/apt/lists/* \
  && rustup component add rustfmt \
  && rustup component add clippy \
- && rm -rf /var/lib/apt/lists/* \
+ && cargo install cargo-audit \
+ && cargo install svgbob_cli \
+ && cargo install mdbook \
  && rustc --version \
  && cargo --version
-

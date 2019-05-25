@@ -1,14 +1,16 @@
 use solana_metrics;
 
+use log::*;
 use rayon::prelude::*;
-use solana::client::mk_client;
-use solana::cluster_info::NodeInfo;
-use solana::thin_client::ThinClient;
+use solana::gen_keys::GenKeys;
+use solana_client::perf_utils::{sample_txs, SampleStats};
 use solana_drone::drone::request_airdrop_transaction;
-use solana_metrics::influxdb;
+use solana_metrics::datapoint_info;
+use solana_sdk::client::Client;
 use solana_sdk::hash::Hash;
 use solana_sdk::signature::{Keypair, KeypairUtil};
-use solana_sdk::system_transaction::SystemTransaction;
+use solana_sdk::system_instruction;
+use solana_sdk::system_transaction;
 use solana_sdk::timing::timestamp;
 use solana_sdk::timing::{duration_as_ms, duration_as_s};
 use solana_sdk::transaction::Transaction;
@@ -19,164 +21,208 @@ use std::process::exit;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use std::thread::sleep;
+use std::thread::Builder;
 use std::time::Duration;
 use std::time::Instant;
 
-pub struct NodeStats {
-    /// Maximum TPS reported by this node
-    pub tps: f64,
-    /// Total transactions reported by this node
-    pub tx: u64,
-}
-
 pub const MAX_SPENDS_PER_TX: usize = 4;
+pub const NUM_LAMPORTS_PER_ACCOUNT: u64 = 20;
 
 pub type SharedTransactions = Arc<RwLock<VecDeque<Vec<(Transaction, u64)>>>>;
 
-pub fn metrics_submit_token_balance(token_balance: u64) {
-    println!("Token balance: {}", token_balance);
-    solana_metrics::submit(
-        influxdb::Point::new("bench-tps")
-            .add_tag("op", influxdb::Value::String("token_balance".to_string()))
-            .add_field("balance", influxdb::Value::Integer(token_balance as i64))
-            .to_owned(),
+pub struct Config {
+    pub id: Keypair,
+    pub threads: usize,
+    pub thread_batch_sleep_ms: usize,
+    pub duration: Duration,
+    pub tx_count: usize,
+    pub sustained: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            id: Keypair::new(),
+            threads: 4,
+            thread_batch_sleep_ms: 0,
+            duration: Duration::new(std::u64::MAX, 0),
+            tx_count: 500_000,
+            sustained: false,
+        }
+    }
+}
+
+pub fn do_bench_tps<T>(
+    clients: Vec<T>,
+    config: Config,
+    gen_keypairs: Vec<Keypair>,
+    keypair0_balance: u64,
+) -> u64
+where
+    T: 'static + Client + Send + Sync,
+{
+    let Config {
+        id,
+        threads,
+        thread_batch_sleep_ms,
+        duration,
+        tx_count,
+        sustained,
+    } = config;
+
+    let clients: Vec<_> = clients.into_iter().map(Arc::new).collect();
+    let client = &clients[0];
+
+    let start = gen_keypairs.len() - (tx_count * 2) as usize;
+    let keypairs = &gen_keypairs[start..];
+
+    let first_tx_count = client.get_transaction_count().expect("transaction count");
+    println!("Initial transaction count {}", first_tx_count);
+
+    let exit_signal = Arc::new(AtomicBool::new(false));
+
+    // Setup a thread per validator to sample every period
+    // collect the max transaction rate and total tx count seen
+    let maxes = Arc::new(RwLock::new(Vec::new()));
+    let sample_period = 1; // in seconds
+    println!("Sampling TPS every {} second...", sample_period);
+    let v_threads: Vec<_> = clients
+        .iter()
+        .map(|client| {
+            let exit_signal = exit_signal.clone();
+            let maxes = maxes.clone();
+            let client = client.clone();
+            Builder::new()
+                .name("solana-client-sample".to_string())
+                .spawn(move || {
+                    sample_txs(&exit_signal, &maxes, sample_period, &client);
+                })
+                .unwrap()
+        })
+        .collect();
+
+    let shared_txs: SharedTransactions = Arc::new(RwLock::new(VecDeque::new()));
+
+    let shared_tx_active_thread_count = Arc::new(AtomicIsize::new(0));
+    let total_tx_sent_count = Arc::new(AtomicUsize::new(0));
+
+    let s_threads: Vec<_> = (0..threads)
+        .map(|_| {
+            let exit_signal = exit_signal.clone();
+            let shared_txs = shared_txs.clone();
+            let shared_tx_active_thread_count = shared_tx_active_thread_count.clone();
+            let total_tx_sent_count = total_tx_sent_count.clone();
+            let client = client.clone();
+            Builder::new()
+                .name("solana-client-sender".to_string())
+                .spawn(move || {
+                    do_tx_transfers(
+                        &exit_signal,
+                        &shared_txs,
+                        &shared_tx_active_thread_count,
+                        &total_tx_sent_count,
+                        thread_batch_sleep_ms,
+                        &client,
+                    );
+                })
+                .unwrap()
+        })
+        .collect();
+
+    // generate and send transactions for the specified duration
+    let start = Instant::now();
+    let mut reclaim_lamports_back_to_source_account = false;
+    let mut i = keypair0_balance;
+    let mut blockhash = Hash::default();
+    let mut blockhash_time = Instant::now();
+    while start.elapsed() < duration {
+        // ping-pong between source and destination accounts for each loop iteration
+        // this seems to be faster than trying to determine the balance of individual
+        // accounts
+        let len = tx_count as usize;
+        if let Ok((new_blockhash, _fee_calculator)) = client.get_new_blockhash(&blockhash) {
+            blockhash = new_blockhash;
+        } else {
+            if blockhash_time.elapsed().as_secs() > 30 {
+                panic!("Blockhash is not updating");
+            }
+            sleep(Duration::from_millis(100));
+            continue;
+        }
+        blockhash_time = Instant::now();
+        let balance = client.get_balance(&id.pubkey()).unwrap_or(0);
+        metrics_submit_lamport_balance(balance);
+        generate_txs(
+            &shared_txs,
+            &blockhash,
+            &keypairs[..len],
+            &keypairs[len..],
+            threads,
+            reclaim_lamports_back_to_source_account,
+        );
+        // In sustained mode overlap the transfers with generation
+        // this has higher average performance but lower peak performance
+        // in tested environments.
+        if !sustained {
+            while shared_tx_active_thread_count.load(Ordering::Relaxed) > 0 {
+                sleep(Duration::from_millis(1));
+            }
+        }
+
+        i += 1;
+        if should_switch_directions(NUM_LAMPORTS_PER_ACCOUNT, i) {
+            reclaim_lamports_back_to_source_account = !reclaim_lamports_back_to_source_account;
+        }
+    }
+
+    // Stop the sampling threads so it will collect the stats
+    exit_signal.store(true, Ordering::Relaxed);
+
+    println!("Waiting for validator threads...");
+    for t in v_threads {
+        if let Err(err) = t.join() {
+            println!("  join() failed with: {:?}", err);
+        }
+    }
+
+    // join the tx send threads
+    println!("Waiting for transmit threads...");
+    for t in s_threads {
+        if let Err(err) = t.join() {
+            println!("  join() failed with: {:?}", err);
+        }
+    }
+
+    let balance = client.get_balance(&id.pubkey()).unwrap_or(0);
+    metrics_submit_lamport_balance(balance);
+
+    compute_and_report_stats(
+        &maxes,
+        sample_period,
+        &start.elapsed(),
+        total_tx_sent_count.load(Ordering::Relaxed),
+    );
+
+    let r_maxes = maxes.read().unwrap();
+    r_maxes.first().unwrap().1.txs
+}
+
+fn metrics_submit_lamport_balance(lamport_balance: u64) {
+    println!("Token balance: {}", lamport_balance);
+    datapoint_info!(
+        "bench-tps-lamport_balance",
+        ("balance", lamport_balance, i64)
     );
 }
 
-pub fn sample_tx_count(
-    exit_signal: &Arc<AtomicBool>,
-    maxes: &Arc<RwLock<Vec<(SocketAddr, NodeStats)>>>,
-    first_tx_count: u64,
-    v: &NodeInfo,
-    sample_period: u64,
-) {
-    let mut client = mk_client(&v);
-    let mut now = Instant::now();
-    let mut initial_tx_count = client.transaction_count();
-    let mut max_tps = 0.0;
-    let mut total;
-
-    let log_prefix = format!("{:21}:", v.tpu.to_string());
-
-    loop {
-        let tx_count = client.transaction_count();
-        assert!(
-            tx_count >= initial_tx_count,
-            "expected tx_count({}) >= initial_tx_count({})",
-            tx_count,
-            initial_tx_count
-        );
-        let duration = now.elapsed();
-        now = Instant::now();
-        let sample = tx_count - initial_tx_count;
-        initial_tx_count = tx_count;
-
-        let ns = duration.as_secs() * 1_000_000_000 + u64::from(duration.subsec_nanos());
-        let tps = (sample * 1_000_000_000) as f64 / ns as f64;
-        if tps > max_tps {
-            max_tps = tps;
-        }
-        if tx_count > first_tx_count {
-            total = tx_count - first_tx_count;
-        } else {
-            total = 0;
-        }
-        println!(
-            "{} {:9.2} TPS, Transactions: {:6}, Total transactions: {}",
-            log_prefix, tps, sample, total
-        );
-        sleep(Duration::new(sample_period, 0));
-
-        if exit_signal.load(Ordering::Relaxed) {
-            println!("{} Exiting validator thread", log_prefix);
-            let stats = NodeStats {
-                tps: max_tps,
-                tx: total,
-            };
-            maxes.write().unwrap().push((v.tpu, stats));
-            break;
-        }
-    }
-}
-
-/// Send loopback payment of 0 tokens and confirm the network processed it
-pub fn send_barrier_transaction(barrier_client: &mut ThinClient, last_id: &mut Hash, id: &Keypair) {
-    let transfer_start = Instant::now();
-
-    let mut poll_count = 0;
-    loop {
-        if poll_count > 0 && poll_count % 8 == 0 {
-            println!(
-                "polling for barrier transaction confirmation, attempt {}",
-                poll_count
-            );
-        }
-
-        *last_id = barrier_client.get_last_id();
-        let signature = barrier_client
-            .transfer(0, &id, id.pubkey(), last_id)
-            .expect("Unable to send barrier transaction");
-
-        let confirmatiom = barrier_client.poll_for_signature(&signature);
-        let duration_ms = duration_as_ms(&transfer_start.elapsed());
-        if confirmatiom.is_ok() {
-            println!("barrier transaction confirmed in {} ms", duration_ms);
-
-            solana_metrics::submit(
-                influxdb::Point::new("bench-tps")
-                    .add_tag(
-                        "op",
-                        influxdb::Value::String("send_barrier_transaction".to_string()),
-                    )
-                    .add_field("poll_count", influxdb::Value::Integer(poll_count))
-                    .add_field("duration", influxdb::Value::Integer(duration_ms as i64))
-                    .to_owned(),
-            );
-
-            // Sanity check that the client balance is still 1
-            let balance = barrier_client
-                .poll_balance_with_timeout(
-                    &id.pubkey(),
-                    &Duration::from_millis(100),
-                    &Duration::from_secs(10),
-                )
-                .expect("Failed to get balance");
-            if balance != 1 {
-                panic!("Expected an account balance of 1 (balance: {}", balance);
-            }
-            break;
-        }
-
-        // Timeout after 3 minutes.  When running a CPU-only leader+validator+drone+bench-tps on a dev
-        // machine, some batches of transactions can take upwards of 1 minute...
-        if duration_ms > 1000 * 60 * 3 {
-            println!("Error: Couldn't confirm barrier transaction!");
-            exit(1);
-        }
-
-        let new_last_id = barrier_client.get_last_id();
-        if new_last_id == *last_id {
-            if poll_count > 0 && poll_count % 8 == 0 {
-                println!("last_id is not advancing, still at {:?}", *last_id);
-            }
-        } else {
-            *last_id = new_last_id;
-        }
-
-        poll_count += 1;
-    }
-}
-
-pub fn generate_txs(
+fn generate_txs(
     shared_txs: &SharedTransactions,
+    blockhash: &Hash,
     source: &[Keypair],
     dest: &[Keypair],
     threads: usize,
     reclaim: bool,
-    leader: &NodeInfo,
 ) {
-    let mut client = mk_client(leader);
-    let last_id = client.get_last_id();
     let tx_count = source.len();
     println!("Signing transactions... {} (reclaim={})", tx_count, reclaim);
     let signing_start = Instant::now();
@@ -190,7 +236,7 @@ pub fn generate_txs(
         .par_iter()
         .map(|(id, keypair)| {
             (
-                Transaction::system_new(id, keypair.pubkey(), 1, last_id),
+                system_transaction::create_user_account(id, &keypair.pubkey(), 1, *blockhash),
                 timestamp(),
             )
         })
@@ -205,16 +251,11 @@ pub fn generate_txs(
         bsps * 1_000_000_f64,
         nsps / 1_000_f64,
         duration_as_ms(&duration),
-        last_id,
+        blockhash,
     );
-    solana_metrics::submit(
-        influxdb::Point::new("bench-tps")
-            .add_tag("op", influxdb::Value::String("generate_txs".to_string()))
-            .add_field(
-                "duration",
-                influxdb::Value::Integer(duration_as_ms(&duration) as i64),
-            )
-            .to_owned(),
+    datapoint_info!(
+        "bench-tps-generate_txs",
+        ("duration", duration_as_ms(&duration), i64)
     );
 
     let sz = transactions.len() / threads;
@@ -227,18 +268,21 @@ pub fn generate_txs(
     }
 }
 
-pub fn do_tx_transfers(
+fn do_tx_transfers<T: Client>(
     exit_signal: &Arc<AtomicBool>,
     shared_txs: &SharedTransactions,
-    leader: &NodeInfo,
     shared_tx_thread_count: &Arc<AtomicIsize>,
     total_tx_sent_count: &Arc<AtomicUsize>,
+    thread_batch_sleep_ms: usize,
+    client: &Arc<T>,
 ) {
-    let client = mk_client(&leader);
     loop {
+        if thread_batch_sleep_ms > 0 {
+            sleep(Duration::from_millis(thread_batch_sleep_ms as u64));
+        }
         let txs;
         {
-            let mut shared_txs_wl = shared_txs.write().unwrap();
+            let mut shared_txs_wl = shared_txs.write().expect("write lock in do_tx_transfers");
             txs = shared_txs_wl.pop_front();
         }
         if let Some(txs0) = txs {
@@ -246,7 +290,7 @@ pub fn do_tx_transfers(
             println!(
                 "Transferring 1 unit {} times... to {}",
                 txs0.len(),
-                leader.tpu
+                client.as_ref().transactions_addr(),
             );
             let tx_len = txs0.len();
             let transfer_start = Instant::now();
@@ -255,7 +299,9 @@ pub fn do_tx_transfers(
                 if now > tx.1 && now - tx.1 > 1000 * 30 {
                     continue;
                 }
-                client.transfer_signed(&tx.0).unwrap();
+                client
+                    .async_send_transaction(tx.0)
+                    .expect("async_send_transaction in do_tx_transfers");
             }
             shared_tx_thread_count.fetch_add(-1, Ordering::Relaxed);
             total_tx_sent_count.fetch_add(tx_len, Ordering::Relaxed);
@@ -264,15 +310,10 @@ pub fn do_tx_transfers(
                 duration_as_ms(&transfer_start.elapsed()),
                 tx_len as f32 / duration_as_s(&transfer_start.elapsed()),
             );
-            solana_metrics::submit(
-                influxdb::Point::new("bench-tps")
-                    .add_tag("op", influxdb::Value::String("do_tx_transfers".to_string()))
-                    .add_field(
-                        "duration",
-                        influxdb::Value::Integer(duration_as_ms(&transfer_start.elapsed()) as i64),
-                    )
-                    .add_field("count", influxdb::Value::Integer(tx_len as i64))
-                    .to_owned(),
+            datapoint_info!(
+                "bench-tps-do_tx_transfers",
+                ("duration", duration_as_ms(&transfer_start.elapsed()), i64),
+                ("count", tx_len, i64)
             );
         }
         if exit_signal.load(Ordering::Relaxed) {
@@ -281,8 +322,8 @@ pub fn do_tx_transfers(
     }
 }
 
-pub fn verify_funding_transfer(client: &mut ThinClient, tx: &Transaction, amount: u64) -> bool {
-    for a in &tx.account_keys[1..] {
+fn verify_funding_transfer<T: Client>(client: &T, tx: &Transaction, amount: u64) -> bool {
+    for a in &tx.message().account_keys[1..] {
         if client.get_balance(a).unwrap_or(0) >= amount {
             return true;
         }
@@ -294,8 +335,8 @@ pub fn verify_funding_transfer(client: &mut ThinClient, tx: &Transaction, amount
 /// fund the dests keys by spending all of the source keys into MAX_SPENDS_PER_TX
 /// on every iteration.  This allows us to replay the transfers because the source is either empty,
 /// or full
-pub fn fund_keys(client: &mut ThinClient, source: &Keypair, dests: &[Keypair], tokens: u64) {
-    let total = tokens * dests.len() as u64;
+pub fn fund_keys<T: Client>(client: &T, source: &Keypair, dests: &[Keypair], lamports: u64) {
+    let total = lamports * dests.len() as u64;
     let mut funded: Vec<(&Keypair, u64)> = vec![(source, total)];
     let mut notfunded: Vec<&Keypair> = dests.iter().collect();
 
@@ -324,7 +365,7 @@ pub fn fund_keys(client: &mut ThinClient, source: &Keypair, dests: &[Keypair], t
             }
         }
 
-        // try to transfer a "few" at a time with recent last_id
+        // try to transfer a "few" at a time with recent blockhash
         //  assume 4MB network buffers, and 512 byte packets
         const FUND_CHUNK_LEN: usize = 4 * 1024 * 1024 / 512;
 
@@ -338,7 +379,10 @@ pub fn fund_keys(client: &mut ThinClient, source: &Keypair, dests: &[Keypair], t
                 .map(|(k, m)| {
                     (
                         k.clone(),
-                        Transaction::system_move_many(k, &m, Default::default(), 0),
+                        Transaction::new_unsigned_instructions(system_instruction::transfer_many(
+                            &k.pubkey(),
+                            &m,
+                        )),
                     )
                 })
                 .collect();
@@ -348,7 +392,7 @@ pub fn fund_keys(client: &mut ThinClient, source: &Keypair, dests: &[Keypair], t
             while !to_fund_txs.is_empty() {
                 let receivers = to_fund_txs
                     .iter()
-                    .fold(0, |len, (_, tx)| len + tx.instructions.len());
+                    .fold(0, |len, (_, tx)| len + tx.message().instructions.len());
 
                 println!(
                     "{} {} to {} in {} txs",
@@ -362,21 +406,27 @@ pub fn fund_keys(client: &mut ThinClient, source: &Keypair, dests: &[Keypair], t
                     to_fund_txs.len(),
                 );
 
-                let last_id = client.get_last_id();
+                let (blockhash, _fee_calculator) = client.get_recent_blockhash().unwrap();
 
-                // re-sign retained to_fund_txes with updated last_id
+                // re-sign retained to_fund_txes with updated blockhash
                 to_fund_txs.par_iter_mut().for_each(|(k, tx)| {
-                    tx.sign(&[k], last_id);
+                    tx.sign(&[*k], blockhash);
                 });
 
                 to_fund_txs.iter().for_each(|(_, tx)| {
-                    client.transfer_signed(&tx).expect("transfer");
+                    client.async_send_transaction(tx.clone()).expect("transfer");
                 });
 
                 // retry anything that seems to have dropped through cracks
                 //  again since these txs are all or nothing, they're fine to
                 //  retry
-                to_fund_txs.retain(|(_, tx)| !verify_funding_transfer(client, &tx, amount));
+                for _ in 0..10 {
+                    to_fund_txs.retain(|(_, tx)| !verify_funding_transfer(client, &tx, amount));
+                    if to_fund_txs.is_empty() {
+                        break;
+                    }
+                    sleep(Duration::from_millis(100));
+                }
 
                 tries += 1;
             }
@@ -387,30 +437,37 @@ pub fn fund_keys(client: &mut ThinClient, source: &Keypair, dests: &[Keypair], t
     }
 }
 
-pub fn airdrop_tokens(
-    client: &mut ThinClient,
+pub fn airdrop_lamports<T: Client>(
+    client: &T,
     drone_addr: &SocketAddr,
     id: &Keypair,
     tx_count: u64,
 ) {
-    let starting_balance = client.poll_get_balance(&id.pubkey()).unwrap_or(0);
-    metrics_submit_token_balance(starting_balance);
+    let starting_balance = client.get_balance(&id.pubkey()).unwrap_or(0);
+    metrics_submit_lamport_balance(starting_balance);
     println!("starting balance {}", starting_balance);
 
     if starting_balance < tx_count {
         let airdrop_amount = tx_count - starting_balance;
         println!(
-            "Airdropping {:?} tokens from {} for {}",
+            "Airdropping {:?} lamports from {} for {}",
             airdrop_amount,
             drone_addr,
             id.pubkey(),
         );
 
-        let last_id = client.get_last_id();
-        match request_airdrop_transaction(&drone_addr, &id.pubkey(), airdrop_amount, last_id) {
+        let (blockhash, _fee_calculator) = client.get_recent_blockhash().unwrap();
+        match request_airdrop_transaction(&drone_addr, &id.pubkey(), airdrop_amount, blockhash) {
             Ok(transaction) => {
-                let signature = client.transfer_signed(&transaction).unwrap();
-                client.poll_for_signature(&signature).unwrap();
+                let signature = client.async_send_transaction(transaction).unwrap();
+                client
+                    .poll_for_signature_confirmation(&signature, 1)
+                    .unwrap_or_else(|_| {
+                        panic!(
+                            "Error requesting airdrop: to addr: {:?} amount: {}",
+                            drone_addr, airdrop_amount
+                        )
+                    })
             }
             Err(err) => {
                 panic!(
@@ -420,13 +477,13 @@ pub fn airdrop_tokens(
             }
         };
 
-        let current_balance = client.poll_get_balance(&id.pubkey()).unwrap_or_else(|e| {
+        let current_balance = client.get_balance(&id.pubkey()).unwrap_or_else(|e| {
             println!("airdrop error {}", e);
             starting_balance
         });
         println!("current balance {}...", current_balance);
 
-        metrics_submit_token_balance(current_balance);
+        metrics_submit_lamport_balance(current_balance);
         if current_balance - starting_balance != airdrop_amount {
             println!(
                 "Airdrop failed! {} {} {}",
@@ -439,8 +496,8 @@ pub fn airdrop_tokens(
     }
 }
 
-pub fn compute_and_report_stats(
-    maxes: &Arc<RwLock<Vec<(SocketAddr, NodeStats)>>>,
+fn compute_and_report_stats(
+    maxes: &Arc<RwLock<Vec<(String, SampleStats)>>>,
     sample_period: u64,
     tx_send_elapsed: &Duration,
     total_tx_send_count: usize,
@@ -454,17 +511,14 @@ pub fn compute_and_report_stats(
     println!("---------------------+---------------+--------------------");
 
     for (sock, stats) in maxes.read().unwrap().iter() {
-        let maybe_flag = match stats.tx {
+        let maybe_flag = match stats.txs {
             0 => "!!!!!",
             _ => "",
         };
 
         println!(
             "{:20} | {:13.2} | {} {}",
-            (*sock).to_string(),
-            stats.tps,
-            stats.tx,
-            maybe_flag
+            sock, stats.tps, stats.txs, maybe_flag
         );
 
         if stats.tps == 0.0 {
@@ -475,27 +529,33 @@ pub fn compute_and_report_stats(
         if stats.tps > max_of_maxes {
             max_of_maxes = stats.tps;
         }
-        if stats.tx > max_tx_count {
-            max_tx_count = stats.tx;
+        if stats.txs > max_tx_count {
+            max_tx_count = stats.txs;
         }
     }
 
     if total_maxes > 0.0 {
         let num_nodes_with_tps = maxes.read().unwrap().len() - nodes_with_zero_tps;
-        let average_max = total_maxes / num_nodes_with_tps as f64;
+        let average_max = total_maxes / num_nodes_with_tps as f32;
         println!(
             "\nAverage max TPS: {:.2}, {} nodes had 0 TPS",
             average_max, nodes_with_zero_tps
         );
     }
 
+    let total_tx_send_count = total_tx_send_count as u64;
+    let drop_rate = if total_tx_send_count > max_tx_count {
+        (total_tx_send_count - max_tx_count) as f64 / total_tx_send_count as f64
+    } else {
+        0.0
+    };
     println!(
         "\nHighest TPS: {:.2} sampling period {}s max transactions: {} clients: {} drop rate: {:.2}",
         max_of_maxes,
         sample_period,
         max_tx_count,
         maxes.read().unwrap().len(),
-        (total_tx_send_count as u64 - max_tx_count) as f64 / total_tx_send_count as f64,
+        drop_rate,
     );
     println!(
         "\tAverage TPS: {}",
@@ -503,16 +563,76 @@ pub fn compute_and_report_stats(
     );
 }
 
-// First transfer 3/4 of the tokens to the dest accounts
-// then ping-pong 1/4 of the tokens back to the other account
-// this leaves 1/4 token buffer in each account
-pub fn should_switch_directions(num_tokens_per_account: u64, i: u64) -> bool {
-    i % (num_tokens_per_account / 4) == 0 && (i >= (3 * num_tokens_per_account) / 4)
+// First transfer 3/4 of the lamports to the dest accounts
+// then ping-pong 1/4 of the lamports back to the other account
+// this leaves 1/4 lamport buffer in each account
+fn should_switch_directions(num_lamports_per_account: u64, i: u64) -> bool {
+    i % (num_lamports_per_account / 4) == 0 && (i >= (3 * num_lamports_per_account) / 4)
+}
+
+pub fn generate_keypairs(seed_keypair: &Keypair, count: usize) -> Vec<Keypair> {
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&seed_keypair.to_bytes()[..32]);
+    let mut rnd = GenKeys::new(seed);
+
+    let mut total_keys = 0;
+    let mut target = count;
+    while target > 1 {
+        total_keys += target;
+        // Use the upper bound for this division otherwise it may not generate enough keys
+        target = (target + MAX_SPENDS_PER_TX - 1) / MAX_SPENDS_PER_TX;
+    }
+    rnd.gen_n_keypairs(total_keys as u64)
+}
+
+pub fn generate_and_fund_keypairs<T: Client>(
+    client: &T,
+    drone_addr: Option<SocketAddr>,
+    funding_pubkey: &Keypair,
+    tx_count: usize,
+    lamports_per_account: u64,
+) -> (Vec<Keypair>, u64) {
+    info!("Creating {} keypairs...", tx_count * 2);
+    let mut keypairs = generate_keypairs(funding_pubkey, tx_count * 2);
+
+    info!("Get lamports...");
+
+    // Sample the first keypair, see if it has lamports, if so then resume.
+    // This logic is to prevent lamport loss on repeated solana-bench-tps executions
+    let last_keypair_balance = client
+        .get_balance(&keypairs[tx_count * 2 - 1].pubkey())
+        .unwrap_or(0);
+
+    if lamports_per_account > last_keypair_balance {
+        let extra = lamports_per_account - last_keypair_balance;
+        let total = extra * (keypairs.len() as u64);
+        if client.get_balance(&funding_pubkey.pubkey()).unwrap_or(0) < total {
+            airdrop_lamports(client, &drone_addr.unwrap(), funding_pubkey, total);
+        }
+        info!("adding more lamports {}", extra);
+        fund_keys(client, funding_pubkey, &keypairs, extra);
+    }
+
+    // 'generate_keypairs' generates extra keys to be able to have size-aligned funding batches for fund_keys.
+    keypairs.truncate(2 * tx_count);
+
+    (keypairs, last_keypair_balance)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use solana::cluster_info::FULLNODE_PORT_RANGE;
+    use solana::local_cluster::{ClusterConfig, LocalCluster};
+    use solana::validator::ValidatorConfig;
+    use solana_client::thin_client::create_client;
+    use solana_drone::drone::run_local_drone;
+    use solana_runtime::bank::Bank;
+    use solana_runtime::bank_client::BankClient;
+    use solana_sdk::client::SyncClient;
+    use solana_sdk::genesis_block::create_genesis_block;
+    use std::sync::mpsc::channel;
+
     #[test]
     fn test_switch_directions() {
         assert_eq!(should_switch_directions(20, 0), false);
@@ -526,5 +646,80 @@ mod tests {
         assert_eq!(should_switch_directions(20, 99), false);
         assert_eq!(should_switch_directions(20, 100), true);
         assert_eq!(should_switch_directions(20, 101), false);
+    }
+
+    #[test]
+    fn test_bench_tps_local_cluster() {
+        solana_logger::setup();
+        let validator_config = ValidatorConfig::default();
+        const NUM_NODES: usize = 1;
+        let cluster = LocalCluster::new(&ClusterConfig {
+            node_stakes: vec![999_990; NUM_NODES],
+            cluster_lamports: 2_000_000,
+            validator_config,
+            ..ClusterConfig::default()
+        });
+
+        let drone_keypair = Keypair::new();
+        cluster.transfer(&cluster.funding_keypair, &drone_keypair.pubkey(), 1_000_000);
+
+        let (addr_sender, addr_receiver) = channel();
+        run_local_drone(drone_keypair, addr_sender, None);
+        let drone_addr = addr_receiver.recv_timeout(Duration::from_secs(2)).unwrap();
+
+        let mut config = Config::default();
+        config.tx_count = 100;
+        config.duration = Duration::from_secs(5);
+
+        let client = create_client(
+            (cluster.entry_point_info.rpc, cluster.entry_point_info.tpu),
+            FULLNODE_PORT_RANGE,
+        );
+
+        let lamports_per_account = 100;
+        let (keypairs, _keypair_balance) = generate_and_fund_keypairs(
+            &client,
+            Some(drone_addr),
+            &config.id,
+            config.tx_count,
+            lamports_per_account,
+        );
+
+        let total = do_bench_tps(vec![client], config, keypairs, 0);
+        assert!(total > 100);
+    }
+
+    #[test]
+    fn test_bench_tps_bank_client() {
+        let (genesis_block, id) = create_genesis_block(10_000);
+        let bank = Bank::new(&genesis_block);
+        let clients = vec![BankClient::new(bank)];
+
+        let mut config = Config::default();
+        config.id = id;
+        config.tx_count = 10;
+        config.duration = Duration::from_secs(5);
+
+        let (keypairs, _keypair_balance) =
+            generate_and_fund_keypairs(&clients[0], None, &config.id, config.tx_count, 20);
+
+        do_bench_tps(clients, config, keypairs, 0);
+    }
+
+    #[test]
+    fn test_bench_tps_fund_keys() {
+        let (genesis_block, id) = create_genesis_block(10_000);
+        let bank = Bank::new(&genesis_block);
+        let client = BankClient::new(bank);
+        let tx_count = 10;
+        let lamports = 20;
+
+        let (keypairs, _keypair_balance) =
+            generate_and_fund_keypairs(&client, None, &id, tx_count, lamports);
+
+        for kp in &keypairs {
+            // TODO: This should be >= lamports, but fails at the moment
+            assert_ne!(client.get_balance(&kp.pubkey()).unwrap(), 0);
+        }
     }
 }

@@ -22,11 +22,15 @@ Methods
 ---
 
 * [confirmTransaction](#confirmtransaction)
-* [getBalance](#getbalance)
 * [getAccountInfo](#getaccountinfo)
-* [getLastId](#getlastid)
+* [getBalance](#getbalance)
+* [getClusterNodes](#getclusternodes)
+* [getRecentBlockhash](#getrecentblockhash)
 * [getSignatureStatus](#getsignaturestatus)
+* [getSlotLeader](#getslotleader)
+* [getNumBlocksSinceSignatureConfirmation](#getnumblockssincesignatureconfirmation)
 * [getTransactionCount](#gettransactioncount)
+* [getEpochVoteAccounts](#getepochvoteaccounts)
 * [requestAirdrop](#requestairdrop)
 * [sendTransaction](#sendtransaction)
 * [startSubscriptionChannel](#startsubscriptionchannel)
@@ -34,6 +38,8 @@ Methods
 * [Subscription Websocket](#subscription-websocket)
   * [accountSubscribe](#accountsubscribe)
   * [accountUnsubscribe](#accountunsubscribe)
+  * [programSubscribe](#programsubscribe)
+  * [programUnsubscribe](#programunsubscribe)
   * [signatureSubscribe](#signaturesubscribe)
   * [signatureUnsubscribe](#signatureunsubscribe)
 
@@ -111,6 +117,30 @@ curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0", "id":1, "
 
 ---
 
+### getClusterNodes
+Returns information about all the nodes participating in the cluster
+
+##### Parameters:
+None
+
+##### Results:
+The result field will be an array of JSON objects, each with the following sub fields:
+* `id` - Node identifier, as base-58 encoded string
+* `gossip` - Gossip network address for the node
+* `tpu` - TPU network address for the node
+* `rpc` - JSON RPC network address for the node, or `null` if the JSON RPC service is not enabled
+
+##### Example:
+```bash
+// Request
+curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0", "id":1, "method":"getClusterNodes"}' http://localhost:8899
+
+// Result
+{"jsonrpc":"2.0","result":[{"gossip":"10.239.6.48:8001","id":"9QzsJf7LPLj8GkXbYT3LFDKqsj2hHG7TA3xinJHu8epQ","rpc":"10.239.6.48:8899","tpu":"10.239.6.48:8856"}],"id":1}
+```
+
+---
+
 ### getAccountInfo
 Returns all information associated with the account of provided Pubkey
 
@@ -120,9 +150,9 @@ Returns all information associated with the account of provided Pubkey
 ##### Results:
 The result field will be a JSON object with the following sub fields:
 
-* `tokens`, number of tokens assigned to this account, as a signed 64-bit integer
+* `lamports`, number of lamports assigned to this account, as a signed 64-bit integer
 * `owner`, array of 32 bytes representing the program this account has been assigned to
-* `userdata`, array of bytes representing any userdata associated with the account
+* `data`, array of bytes representing any data associated with the account
 * `executable`, boolean indicating if the account contains a program (and is strictly read-only)
 * `loader`, array of 32 bytes representing the loader for this program (if `executable`), otherwise all
 
@@ -132,27 +162,30 @@ The result field will be a JSON object with the following sub fields:
 curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0", "id":1, "method":"getAccountInfo", "params":["2gVkYWexTHR5Hb2aLeQN3tnngvWzisFKXDUPrgMHpdST"]}' http://localhost:8899
 
 // Result
-{"jsonrpc":"2.0","result":{"executable":false,"loader":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"owner":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"tokens":1,"userdata":[3,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,20,0,0,0,0,0,0,0,50,48,53,48,45,48,49,45,48,49,84,48,48,58,48,48,58,48,48,90,252,10,7,28,246,140,88,177,98,82,10,227,89,81,18,30,194,101,199,16,11,73,133,20,246,62,114,39,20,113,189,32,50,0,0,0,0,0,0,0,247,15,36,102,167,83,225,42,133,127,82,34,36,224,207,130,109,230,224,188,163,33,213,13,5,117,211,251,65,159,197,51,0,0,0,0,0,0]},"id":1}
+{"jsonrpc":"2.0","result":{"executable":false,"loader":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"owner":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"lamports":1,"data":[3,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,20,0,0,0,0,0,0,0,50,48,53,48,45,48,49,45,48,49,84,48,48,58,48,48,58,48,48,90,252,10,7,28,246,140,88,177,98,82,10,227,89,81,18,30,194,101,199,16,11,73,133,20,246,62,114,39,20,113,189,32,50,0,0,0,0,0,0,0,247,15,36,102,167,83,225,42,133,127,82,34,36,224,207,130,109,230,224,188,163,33,213,13,5,117,211,251,65,159,197,51,0,0,0,0,0,0]},"id":1}
 ```
 
 ---
 
-### getLastId
-Returns the last entry ID from the ledger
+### getRecentBlockhash
+Returns a recent block hash from the ledger, and a fee schedule that can be used
+to compute the cost of submitting a transaction using it.
 
 ##### Parameters:
 None
 
 ##### Results:
-* `string` - the ID of last entry, a Hash as base-58 encoded string
+An array consisting of
+* `string` - a Hash as base-58 encoded string
+* `FeeCalculator object` - the fee schedule for this block hash
 
 ##### Example:
 ```bash
 // Request
-curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1, "method":"getLastId"}' http://localhost:8899
+curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1, "method":"getRecentBlockhash"}' http://localhost:8899
 
 // Result
-{"jsonrpc":"2.0","result":"GH7ome3EiwEr7tu9JuTh2dpYWBJK3z69Xm1ZE3MEE6JC","id":1}
+{"jsonrpc":"2.0","result":["GH7ome3EiwEr7tu9JuTh2dpYWBJK3z69Xm1ZE3MEE6JC",{"lamportsPerSignature": 0}],"id":1}
 ```
 
 ---
@@ -166,12 +199,10 @@ events.
 * `string` - Signature of Transaction to confirm, as base-58 encoded string
 
 ##### Results:
-* `string` - Transaction status:
-    * `Confirmed` - Transaction was successful
-    * `SignatureNotFound` - Unknown transaction
-    * `ProgramRuntimeError` - An error occurred in the program that processed this Transaction
-    * `AccountInUse` - Another Transaction had a write lock one of the Accounts specified in this Transaction.  The Transaction may succeed if retried
-    * `GenericFailure` - Some other error occurred.  **Note**: In the future new Transaction statuses may be added to this list.  It's safe to assume that all new statuses will be more specific error conditions that previously presented as `GenericFailure`
+* `null` - Unknown transaction
+* `object` - Transaction status:
+    * `"Ok": null` - Transaction was successful
+    * `"Err": <ERR>` - Transaction failed with TransactionError <ERR> [TransactionError definitions](https://github.com/solana-labs/solana/blob/master/sdk/src/transaction.rs#L14)
 
 ##### Example:
 ```bash
@@ -182,7 +213,48 @@ curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0", "id":1, "
 {"jsonrpc":"2.0","result":"SignatureNotFound","id":1}
 ```
 
+-----
+
+### getSlotLeader
+Returns the current slot leader
+
+##### Parameters:
+None
+
+##### Results:
+* `string` - Node Id as base-58 encoded string
+
+##### Example:
+```bash
+// Request
+curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1, "method":"getSlotLeader"}' http://localhost:8899
+
+// Result
+{"jsonrpc":"2.0","result":"ENvAW7JScgYq6o4zKZwewtkzzJgDzuJAFxYasvmEQdpS","id":1}
+```
+
+-----
+
+### getNumBlocksSinceSignatureConfirmation
+Returns the current number of blocks since signature has been confirmed.
+
+##### Parameters:
+* `string` - Signature of Transaction to confirm, as base-58 encoded string
+
+##### Results:
+* `integer` - count, as unsigned 64-bit integer
+
+##### Example:
+```bash
+// Request
+curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0", "id":1, "method":"getNumBlocksSinceSignatureConfirmation", "params":["5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW"]}' http://localhost:8899
+
+// Result
+{"jsonrpc":"2.0","result":8,"id":1}
+```
+
 ---
+
 ### getTransactionCount
 Returns the current Transaction count from the ledger
 
@@ -203,12 +275,45 @@ curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1, "m
 
 ---
 
-### requestAirdrop
-Requests an airdrop of tokens to a Pubkey
+### getEpochVoteAccounts
+Returns the account info and associated stake for all the voting accounts in the current epoch.
 
 ##### Parameters:
-* `string` - Pubkey of account to receive tokens, as base-58 encoded string
-* `integer` - token quantity, as a signed 64-bit integer
+None
+
+##### Results:
+An array consisting of vote accounts:
+* `string` - the vote account's Pubkey as base-58 encoded string
+* `integer` - the stake, in lamports, delegated to this vote account
+* `VoteState` - the vote account's state
+
+Each VoteState will be a JSON object with the following sub fields:
+
+* `votes`, array of most recent vote lockouts
+* `node_pubkey`, the pubkey of the node that votes using this account
+* `authorized_voter_pubkey`, the pubkey of the authorized vote signer for this account
+* `commission`, a 32-bit integer used as a fraction (commission/MAX_U32) for rewards payout
+* `root_slot`, the most recent slot this account has achieved maximum lockout
+* `credits`, credits accrued by this account for reaching lockouts
+
+##### Example:
+```bash
+// Request
+curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1, "method":"getEpochVoteAccounts"}' http://localhost:8899
+
+// Result
+{"jsonrpc":"2.0","result":[[[84,115,89,23,41,83,221,72,58,23,53,245,195,188,140,161,242,189,200,164,139,214,12,180,84,161,28,151,24,243,159,125],10000000,{"authorized_voter_pubkey":[84,115,89,23,41,83,221,72,58,23,53,245,195,188,140,161,242,189,200,164,139,214,12,180,84,161,28,151,24,243,159,125],"commission":0,"credits":0,"node_pubkey":[49,139,227,211,47,39,69,86,131,244,160,144,228,169,84,143,142,253,83,81,212,110,254,12,242,71,219,135,30,60,157,213],"root_slot":null,"votes":[{"confirmation_count":1,"slot":0}]}]],"id":1}
+```
+
+---
+
+
+### requestAirdrop
+Requests an airdrop of lamports to a Pubkey
+
+##### Parameters:
+* `string` - Pubkey of account to receive lamports, as base-58 encoded string
+* `integer` - lamports, as a signed 64-bit integer
 
 ##### Results:
 * `string` - Transaction Signature of airdrop, as base-58 encoded string
@@ -248,14 +353,25 @@ curl -X POST -H "Content-Type: application/json" -d '{"jsonrpc":"2.0","id":1, "m
 After connect to the RPC PubSub websocket at `ws://<ADDRESS>/`:
 - Submit subscription requests to the websocket using the methods below
 - Multiple subscriptions may be active at once
+- All subscriptions take an optional `confirmations` parameter, which defines
+  how many confirmed blocks the node should wait before sending a notification.
+  The greater the number, the more likely the notification is to represent
+  consensus across the cluster, and the less likely it is to be affected by
+  forking or rollbacks. If unspecified, the default value is 0; the node will
+  send a notification as soon as it witnesses the event. The maximum
+  `confirmations` wait length is the cluster's `MAX_LOCKOUT_HISTORY`, which
+  represents the economic finality of the chain.
 
 ---
 
 ### accountSubscribe
-Subscribe to an account to receive notifications when the userdata for a given account public key changes
+Subscribe to an account to receive notifications when the lamports or data
+for a given account public key changes
 
 ##### Parameters:
 * `string` - account Pubkey, as base-58 encoded string
+* `integer` - optional, number of confirmed blocks to wait before notification.
+  Default: 0, Max: `MAX_LOCKOUT_HISTORY` (greater integers rounded down)
 
 ##### Results:
 * `integer` - Subscription id (needed to unsubscribe)
@@ -265,19 +381,21 @@ Subscribe to an account to receive notifications when the userdata for a given a
 // Request
 {"jsonrpc":"2.0", "id":1, "method":"accountSubscribe", "params":["CM78CPUeXjn8o3yroDHxUtKsZZgoy4GPkPPXfouKNH12"]}
 
+{"jsonrpc":"2.0", "id":1, "method":"accountSubscribe", "params":["CM78CPUeXjn8o3yroDHxUtKsZZgoy4GPkPPXfouKNH12", 15]}
+
 // Result
 {"jsonrpc": "2.0","result": 0,"id": 1}
 ```
 
 ##### Notification Format:
 ```bash
-{"jsonrpc": "2.0","method": "accountNotification", "params": {"result": {"executable":false,"loader":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"owner":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"tokens":1,"userdata":[3,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,20,0,0,0,0,0,0,0,50,48,53,48,45,48,49,45,48,49,84,48,48,58,48,48,58,48,48,90,252,10,7,28,246,140,88,177,98,82,10,227,89,81,18,30,194,101,199,16,11,73,133,20,246,62,114,39,20,113,189,32,50,0,0,0,0,0,0,0,247,15,36,102,167,83,225,42,133,127,82,34,36,224,207,130,109,230,224,188,163,33,213,13,5,117,211,251,65,159,197,51,0,0,0,0,0,0]},"subscription":0}}
+{"jsonrpc": "2.0","method": "accountNotification", "params": {"result": {"executable":false,"loader":[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"owner":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"lamports":1,"data":[3,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0,0,0,0,0,0,0,20,0,0,0,0,0,0,0,50,48,53,48,45,48,49,45,48,49,84,48,48,58,48,48,58,48,48,90,252,10,7,28,246,140,88,177,98,82,10,227,89,81,18,30,194,101,199,16,11,73,133,20,246,62,114,39,20,113,189,32,50,0,0,0,0,0,0,0,247,15,36,102,167,83,225,42,133,127,82,34,36,224,207,130,109,230,224,188,163,33,213,13,5,117,211,251,65,159,197,51,0,0,0,0,0,0]},"subscription":0}}
 ```
 
 ---
 
 ### accountUnsubscribe
-Unsubscribe from account userdata change notifications
+Unsubscribe from account change notifications
 
 ##### Parameters:
 * `integer` - id of account Subscription to cancel
@@ -296,12 +414,66 @@ Unsubscribe from account userdata change notifications
 
 ---
 
+### programSubscribe
+Subscribe to a program to receive notifications when the lamports or data
+for a given account owned by the program changes
+
+##### Parameters:
+* `string` - program_id Pubkey, as base-58 encoded string
+* `integer` - optional, number of confirmed blocks to wait before notification.
+  Default: 0, Max: `MAX_LOCKOUT_HISTORY` (greater integers rounded down)
+
+##### Results:
+* `integer` - Subscription id (needed to unsubscribe)
+
+##### Example:
+```bash
+// Request
+{"jsonrpc":"2.0", "id":1, "method":"programSubscribe", "params":["9gZbPtbtHrs6hEWgd6MbVY9VPFtS5Z8xKtnYwA2NynHV"]}
+
+{"jsonrpc":"2.0", "id":1, "method":"programSubscribe", "params":["9gZbPtbtHrs6hEWgd6MbVY9VPFtS5Z8xKtnYwA2NynHV", 15]}
+
+// Result
+{"jsonrpc": "2.0","result": 0,"id": 1}
+```
+
+##### Notification Format:
+* `string` - account Pubkey, as base-58 encoded string
+* `object` - account info JSON object (see [getAccountInfo](#getaccountinfo) for field details)
+```bash
+{"jsonrpc":"2.0","method":"programNotification","params":{{"result":["8Rshv2oMkPu5E4opXTRyuyBeZBqQ4S477VG26wUTFxUM",{"executable":false,"lamports":1,"owner":[129,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"data":[1,1,1,0,0,0,0,0,0,0,20,0,0,0,0,0,0,0,50,48,49,56,45,49,50,45,50,52,84,50,51,58,53,57,58,48,48,90,235,233,39,152,15,44,117,176,41,89,100,86,45,61,2,44,251,46,212,37,35,118,163,189,247,84,27,235,178,62,55,89,0,0,0,0,50,0,0,0,0,0,0,0,235,233,39,152,15,44,117,176,41,89,100,86,45,61,2,44,251,46,212,37,35,118,163,189,247,84,27,235,178,62,45,4,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]}],"subscription":0}}
+```
+
+---
+
+### programUnsubscribe
+Unsubscribe from program-owned account change notifications
+
+##### Parameters:
+* `integer` - id of account Subscription to cancel
+
+##### Results:
+* `bool` - unsubscribe success message
+
+##### Example:
+```bash
+// Request
+{"jsonrpc":"2.0", "id":1, "method":"programUnsubscribe", "params":[0]}
+
+// Result
+{"jsonrpc": "2.0","result": true,"id": 1}
+```
+
+---
+
 ### signatureSubscribe
 Subscribe to a transaction signature to receive notification when the transaction is confirmed
 On `signatureNotification`, the subscription is automatically cancelled
 
 ##### Parameters:
 * `string` - Transaction Signature, as base-58 encoded string
+* `integer` - optional, number of confirmed blocks to wait before notification.
+  Default: 0, Max: `MAX_LOCKOUT_HISTORY` (greater integers rounded down)
 
 ##### Results:
 * `integer` - subscription id (needed to unsubscribe)
@@ -310,6 +482,8 @@ On `signatureNotification`, the subscription is automatically cancelled
 ```bash
 // Request
 {"jsonrpc":"2.0", "id":1, "method":"signatureSubscribe", "params":["2EBVM6cB8vAAD93Ktr6Vd8p67XPbQzCJX47MpReuiCXJAtcjaxpvWpcg9Ege1Nr5Tk3a2GFrByT7WPBjdsTycY9b"]}
+
+{"jsonrpc":"2.0", "id":1, "method":"signatureSubscribe", "params":["2EBVM6cB8vAAD93Ktr6Vd8p67XPbQzCJX47MpReuiCXJAtcjaxpvWpcg9Ege1Nr5Tk3a2GFrByT7WPBjdsTycY9b", 15]}
 
 // Result
 {"jsonrpc": "2.0","result": 0,"id": 1}
@@ -323,10 +497,10 @@ On `signatureNotification`, the subscription is automatically cancelled
 ---
 
 ### signatureUnsubscribe
-Unsubscribe from account userdata change notifications
+Unsubscribe from signature confirmation notification
 
 ##### Parameters:
-* `integer` - id of account subscription to cancel
+* `integer` - subscription id to cancel
 
 ##### Results:
 * `bool` - unsubscribe success message

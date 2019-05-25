@@ -10,6 +10,8 @@ annotate() {
 
 ci/affects-files.sh \
   .rs$ \
+  Cargo.lock$ \
+  Cargo.toml$ \
   ci/test-bench.sh \
 || {
   annotate --style info --context test-bench \
@@ -22,7 +24,7 @@ source ci/_
 source ci/upload-ci-artifact.sh
 
 eval "$(ci/channel-info.sh)"
-ci/version-check-with-upgrade.sh nightly
+source ci/rust-version.sh nightly
 
 set -o pipefail
 export RUST_BACKTRACE=1
@@ -37,19 +39,34 @@ fi
 
 BENCH_FILE=bench_output.log
 BENCH_ARTIFACT=current_bench_results.log
-_ cargo +nightly bench --features=unstable --verbose \
-  -- -Z unstable-options --format=json | tee "$BENCH_FILE"
 
-# Run bpf_loader bench with bpf_c feature enabled
-echo --- program/native/bpf_loader bench --features=bpf_c
-(
-  set -x
-  cd programs/native/bpf_loader
-  cargo +nightly bench --verbose --features="bpf_c" \
-    -- -Z unstable-options --format=json --nocapture | tee -a ../../../"$BENCH_FILE"
-)
+# Ensure all dependencies are built
+_ cargo +$rust_nightly build --all --release
 
-_ cargo +nightly run --release --package solana-upload-perf \
-  -- "$BENCH_FILE" "$TARGET_BRANCH" "$UPLOAD_METRICS" > "$BENCH_ARTIFACT"
+# Remove "BENCH_FILE", if it exists so that the following commands can append
+rm -f "$BENCH_FILE"
 
+# Run sdk benches
+_ cargo +$rust_nightly bench --manifest-path sdk/Cargo.toml ${V:+--verbose} \
+  -- -Z unstable-options --format=json | tee -a "$BENCH_FILE"
+
+# Run runtime benches
+_ cargo +$rust_nightly bench --manifest-path runtime/Cargo.toml ${V:+--verbose} \
+  -- -Z unstable-options --format=json | tee -a "$BENCH_FILE"
+
+# Run core benches
+_ cargo +$rust_nightly bench --manifest-path core/Cargo.toml ${V:+--verbose} \
+  -- -Z unstable-options --format=json | tee -a "$BENCH_FILE"
+
+# Run bpf benches
+_ cargo +$rust_nightly bench --manifest-path programs/bpf/Cargo.toml ${V:+--verbose} --features=bpf_c \
+  -- -Z unstable-options --format=json --nocapture | tee -a "$BENCH_FILE"
+
+# TODO: debug why solana-upload-perf takes over 30 minutes to complete.
+exit 0
+
+_ cargo +$rust_nightly run --release --package solana-upload-perf \
+  -- "$BENCH_FILE" "$TARGET_BRANCH" "$UPLOAD_METRICS" | tee "$BENCH_ARTIFACT"
+
+upload-ci-artifact "$BENCH_FILE"
 upload-ci-artifact "$BENCH_ARTIFACT"

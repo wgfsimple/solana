@@ -4,9 +4,7 @@ set -e
 here=$(dirname "$0")
 cd "$here"/..
 
-# This job doesn't run within a container, try once to upgrade tooling on a
-# version check failure
-ci/version-check-with-upgrade.sh stable
+source ci/rust-version.sh stable
 
 export RUST_BACKTRACE=1
 
@@ -15,7 +13,7 @@ export LD_LIBRARY_PATH=$PWD/target/perf-libs:$LD_LIBRARY_PATH
 
 export RUST_LOG=multinode=info
 
-scripts/ulimit-n.sh
+source scripts/ulimit-n.sh
 
 if [[ $(sysctl -n net.core.rmem_default) -lt 1610612736 ]]; then
   echo 'Error: rmem_default too small, run "sudo sysctl -w net.core.rmem_default=1610612736" to continue'
@@ -38,4 +36,5 @@ if [[ $(sysctl -n net.core.wmem_max) -lt 1610612736 ]]; then
 fi
 
 set -x
-exec cargo test --release --features=erasure test_multi_node_dynamic_network -- --ignored
+export SOLANA_DYNAMIC_NODES=120
+exec cargo +"$rust_stable" test --release --features=erasure test_multi_node_dynamic_network -- --ignored

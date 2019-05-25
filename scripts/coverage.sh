@@ -12,6 +12,12 @@ source ci/_
 : "${BUILDKITE_COMMIT:=local}"
 reportName="lcov-${BUILDKITE_COMMIT:0:9}"
 
+if [[ -n $1 ]]; then
+  crate=--manifest-path=$1/Cargo.toml
+else
+  crate=--all
+fi
+
 coverageFlags=(-Zprofile)                # Enable coverage
 coverageFlags+=("-Clink-dead-code")      # Dead code should appear red in the report
 coverageFlags+=("-Ccodegen-units=1")     # Disable ThinLTO which corrupts debuginfo (see [rustc issue #45511]).
@@ -28,36 +34,39 @@ if [[ -d target/cov ]]; then
 fi
 rm -rf target/cov/$reportName
 
-_ cargo +nightly build --target-dir target/cov --all
-_ cargo +nightly test --target-dir target/cov --lib --all -- --test-threads=1
+source ci/rust-version.sh nightly
+_ cargo +$rust_nightly build --target-dir target/cov "$crate"
+_ cargo +$rust_nightly test --target-dir target/cov --lib "$crate" -- --test-threads=1
 
-_ scripts/fetch-grcov.sh
 echo "--- grcov"
-./grcov target/cov/debug/deps/ > target/cov/lcov-full.info
 
-echo "--- filter-non-local-files-from-lcov"
-# TODO: The grcov `-s` option could be used to replace this function once grcov
-# doesn't panic on files with the same name in different directories of a
-# repository
-filter-non-local-files-from-lcov() {
+_ grcov target/cov/debug/deps/ > target/cov/lcov-full.info
+
+echo "--- filter-files-from-lcov"
+
+# List of directories to remove from the coverage report
+ignored_directories="^(bench-tps|upload-perf|bench-streamer)"
+
+filter-files-from-lcov() {
   declare skip=false
   while read -r line; do
     if [[ $line =~ ^SF:/ ]]; then
       skip=true # Skip all absolute paths as these are references into ~/.cargo
     elif [[ $line =~ ^SF:(.*) ]]; then
-      # Skip relative paths that don't exist
       declare file="${BASH_REMATCH[1]}"
-      if [[ -r $file ]]; then
+      if [[ $file =~ $ignored_directories ]]; then
+        skip=true # Skip paths into ignored locations
+      elif [[ -r $file ]]; then
         skip=false
       else
-        skip=true
+        skip=true # Skip relative paths that don't exist
       fi
     fi
     [[ $skip = true ]] || echo "$line"
   done
 }
 
-filter-non-local-files-from-lcov < target/cov/lcov-full.info > target/cov/lcov.info
+filter-files-from-lcov < target/cov/lcov-full.info > target/cov/lcov.info
 
 echo "--- html report"
 # ProTip: genhtml comes from |brew install lcov| or |apt-get install lcov|

@@ -20,7 +20,7 @@ $ aws configure
 ```
 More information on AWS CLI configuration can be found [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-getting-started.html#cli-quick-configuration)
 
-### Metrics configuration
+### Metrics configuration (Optional)
 Ensure that `$(whoami)` is the name of an InfluxDB user account with enough
 access to create a new InfluxDB database.  Ask mvines@ for help if needed.
 
@@ -31,11 +31,11 @@ NOTE: This example uses GCE.  If you are using AWS EC2, replace `./gce.sh` with
 
 ```bash
 $ cd net/
-$ ./gce.sh create -n 5 -c 1  #<-- Create a GCE testnet with 5 additional nodes (beyond the bootstrap node), 1 client bencher (billing starts here)
-$ ./init-metrics.sh $(whoami)   #<-- Configure a metrics database for the testnet
-$ ./net.sh start             #<-- Deploy the network from the local workspace
-$ ./ssh.sh                   #<-- Details on how to ssh into any testnet node to access logs/etc
-$ ./gce.sh delete            #<-- Dispose of the network (billing stops here)
+$ ./gce.sh create -n 5 -c 1     #<-- Create a GCE testnet with 5 additional nodes (beyond the bootstrap node) and 1 client (billing starts here)
+$ ./init-metrics.sh -c $(whoami)   #<-- Configure a metrics database for the testnet
+$ ./net.sh start                #<-- Deploy the network from the local workspace and start all clients with bench-tps
+$ ./ssh.sh                      #<-- Details on how to ssh into any testnet node to access logs/etc
+$ ./gce.sh delete               #<-- Dispose of the network (billing stops here)
 ```
 
 ## Tips
@@ -52,12 +52,12 @@ or
 $ ./ec2.sh create -P ...
 ```
 
-### Deploying a Snap-based network
-To deploy the latest pre-built `edge` channel Snap (ie, latest from the `master`
+### Deploying a tarball-based network
+To deploy the latest pre-built `edge` channel tarball (ie, latest from the `master`
 branch), once the testnet has been created run:
 
 ```bash
-$ ./net.sh start -s edge
+$ ./net.sh start -t edge
 ```
 
 ### Enabling CUDA
@@ -70,7 +70,7 @@ or
 $ ./ec2.sh create -g ...
 ```
 
-If deploying a Snap-based network nothing further is required, as GPU presence
+If deploying a tarball-based network nothing further is required, as GPU presence
 is detected at runtime and the CUDA build is auto selected.
 
 If deploying a locally-built network, first run `./fetch-perf-libs.sh` then

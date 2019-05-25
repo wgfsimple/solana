@@ -1,17 +1,17 @@
-use clap::{crate_version, App, Arg};
-use serde_json;
-use solana::cluster_info::{Node, NodeInfo, FULLNODE_PORT_RANGE};
+use clap::{crate_description, crate_name, crate_version, App, Arg};
+use solana::cluster_info::{Node, FULLNODE_PORT_RANGE};
+use solana::contact_info::ContactInfo;
 use solana::replicator::Replicator;
 use solana::socketaddr;
-use solana_sdk::signature::{Keypair, KeypairUtil};
-use std::fs::File;
-use std::net::{Ipv4Addr, SocketAddr};
+use solana_sdk::signature::{read_keypair, Keypair, KeypairUtil};
 use std::process::exit;
+use std::sync::Arc;
 
 fn main() {
     solana_logger::setup();
 
-    let matches = App::new("replicator")
+    let matches = App::new(crate_name!())
+        .about(crate_description!())
         .version(crate_version!())
         .arg(
             Arg::with_name("identity")
@@ -19,15 +19,16 @@ fn main() {
                 .long("identity")
                 .value_name("PATH")
                 .takes_value(true)
-                .help("Run with the identity found in FILE"),
+                .help("File containing an identity (keypair)"),
         )
         .arg(
-            Arg::with_name("network")
+            Arg::with_name("entrypoint")
                 .short("n")
-                .long("network")
+                .long("entrypoint")
                 .value_name("HOST:PORT")
                 .takes_value(true)
-                .help("Rendezvous with the network at this gossip entry point"),
+                .required(true)
+                .help("Rendezvous with the cluster at this entry point"),
         )
         .arg(
             Arg::with_name("ledger")
@@ -38,50 +39,67 @@ fn main() {
                 .required(true)
                 .help("use DIR as persistent ledger location"),
         )
+        .arg(
+            Arg::with_name("storage_keypair")
+                .short("s")
+                .long("storage-keypair")
+                .value_name("PATH")
+                .takes_value(true)
+                .required(true)
+                .help("File containing the storage account keypair"),
+        )
         .get_matches();
 
-    let ledger_path = matches.value_of("ledger");
+    let ledger_path = matches.value_of("ledger").unwrap();
 
-    let (keypair, gossip) = if let Some(i) = matches.value_of("identity") {
-        let path = i.to_string();
-        if let Ok(file) = File::open(path.clone()) {
-            let parse: serde_json::Result<solana_fullnode_config::Config> =
-                serde_json::from_reader(file);
-            if let Ok(config_data) = parse {
-                let keypair = config_data.keypair();
-                let node_info = NodeInfo::new_with_pubkey_socketaddr(
-                    keypair.pubkey(),
-                    &config_data.bind_addr(FULLNODE_PORT_RANGE.0),
-                );
-                (keypair, node_info.gossip)
-            } else {
-                eprintln!("failed to parse {}", path);
-                exit(1);
-            }
-        } else {
-            eprintln!("failed to read {}", path);
+    let keypair = if let Some(identity) = matches.value_of("identity") {
+        read_keypair(identity).unwrap_or_else(|err| {
+            eprintln!("{}: Unable to open keypair file: {}", err, identity);
             exit(1);
-        }
+        })
     } else {
-        (Keypair::new(), socketaddr!([127, 0, 0, 1], 8700))
+        Keypair::new()
+    };
+    let storage_keypair = if let Some(storage_keypair) = matches.value_of("storage_keypair") {
+        read_keypair(storage_keypair).unwrap_or_else(|err| {
+            eprintln!("{}: Unable to open keypair file: {}", err, storage_keypair);
+            exit(1);
+        })
+    } else {
+        Keypair::new()
     };
 
-    let node = Node::new_with_external_ip(keypair.pubkey(), &gossip);
-
-    println!(
-        "replicating the data with keypair: {:?} gossip:{:?}",
-        keypair.pubkey(),
-        gossip
-    );
-
-    let network_addr = matches
-        .value_of("network")
-        .map(|network| network.parse().expect("failed to parse network address"))
+    let entrypoint_addr = matches
+        .value_of("entrypoint")
+        .map(|entrypoint| {
+            solana_netutil::parse_host_port(entrypoint).expect("failed to parse entrypoint address")
+        })
         .unwrap();
 
-    let leader_info = NodeInfo::new_entry_point(&network_addr);
+    let gossip_addr = {
+        let mut addr = socketaddr!([127, 0, 0, 1], 8700);
+        addr.set_ip(solana_netutil::get_public_ip_addr(&entrypoint_addr).unwrap());
+        addr
+    };
+    let node =
+        Node::new_replicator_with_external_ip(&keypair.pubkey(), &gossip_addr, FULLNODE_PORT_RANGE);
 
-    let replicator = Replicator::new(ledger_path, node, &leader_info, &keypair).unwrap();
+    println!(
+        "replicating the data with keypair={:?} gossip_addr={:?}",
+        keypair.pubkey(),
+        gossip_addr
+    );
 
-    replicator.join();
+    let entrypoint_info = ContactInfo::new_gossip_entry_point(&entrypoint_addr);
+    let mut replicator = Replicator::new(
+        ledger_path,
+        node,
+        entrypoint_info,
+        Arc::new(keypair),
+        Arc::new(storage_keypair),
+    )
+    .unwrap();
+
+    replicator.run();
+    replicator.close();
 }

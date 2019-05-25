@@ -14,6 +14,6 @@ exec docker run \
   "$PROGRAM" "$@"
 EOM
 
-for program in clang clang++ llc ld.lld llvm-objdump; do
+for program in clang clang++ llc ld.lld llvm-objdump llvm-objcopy; do
   echo "$SCRIPT" > bin/$program
 done

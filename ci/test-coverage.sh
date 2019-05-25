@@ -10,6 +10,8 @@ annotate() {
 
 ci/affects-files.sh \
   .rs$ \
+  Cargo.lock$ \
+  Cargo.toml$ \
   ci/test-coverage.sh \
   scripts/coverage.sh \
 || {
@@ -19,7 +21,7 @@ ci/affects-files.sh \
 }
 
 source ci/upload-ci-artifact.sh
-ci/version-check-with-upgrade.sh nightly
+source scripts/ulimit-n.sh
 
 scripts/coverage.sh
 

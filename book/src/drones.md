@@ -10,7 +10,7 @@ client's account.
 A drone is a simple signing service. It listens for requests to sign
 *transaction data*.  Once received, the drone validates the request however it
 sees fit. It may, for example, only accept transaction data with a
-`SystemInstruction::Move` instruction transferring only up to a certain amount
+`SystemInstruction::Transfer` instruction transferring only up to a certain amount
 of tokens. If the drone accepts the transaction, it returns an `Ok(Signature)`
 where `Signature` is a signature of the transaction data using the drone's
 private key. If it rejects the transaction data, it returns a `DroneError`
@@ -46,7 +46,7 @@ desired cluster.
 
 ## Attack vectors
 
-### Invalid last_id
+### Invalid recent_blockhash
 
 The drone may prefer its airdrops only target a particular Solana cluster.  To
 do that, it listens to the cluster for new entry IDs and ensure any requests
@@ -68,15 +68,15 @@ A client may request multiple airdrops before the first has been submitted to
 the ledger. The client may do this maliciously or simply because it thinks the
 first request was dropped. The drone should not simply query the cluster to
 ensure the client has not already received an airdrop. Instead, it should use
-`last_id` to ensure the previous request is expired before signing another.
-Note that the Solana cluster will reject any transaction with a `last_id`
+`recent_blockhash` to ensure the previous request is expired before signing another.
+Note that the Solana cluster will reject any transaction with a `recent_blockhash`
 beyond a certain *age*.
 
 ### Denial of Service
 
 If the transaction data size is smaller than the size of the returned signature
 (or descriptive error), a single client can flood the network.  Considering
-that a simple `Move` operation requires two public keys (each 32 bytes) and a
+that a simple `Transfer` operation requires two public keys (each 32 bytes) and a
 `fee` field, and that the returned signature is 64 bytes (and a byte to
 indicate `Ok`), consideration for this attack may not be required.
 

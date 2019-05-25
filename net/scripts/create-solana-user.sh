@@ -6,6 +6,7 @@ set -ex
 
 adduser solana --gecos "" --disabled-password --quiet
 adduser solana sudo
+adduser solana adm
 echo "solana ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 id solana
 

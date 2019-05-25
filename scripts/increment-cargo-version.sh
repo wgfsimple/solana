@@ -28,12 +28,12 @@ readCargoVariable() {
   echo "Unable to locate $variable in $Cargo_toml" 1>&2
 }
 
-# shellcheck disable=2044 # Disable 'For loops over find output are fragile...'
-Cargo_tomls="$(find . -name Cargo.toml)"
+# shellcheck disable=2207
+Cargo_tomls=($(find . -name Cargo.toml))
 
 # Collect the name of all the internal crates
 crates=()
-for Cargo_toml in $Cargo_tomls; do
+for Cargo_toml in "${Cargo_tomls[@]}"; do
   crates+=("$(readCargoVariable name "$Cargo_toml")")
 done
 
@@ -42,7 +42,8 @@ MAJOR=0
 MINOR=0
 PATCH=0
 SPECIAL=""
-semverParseInto "$(readCargoVariable version ./Cargo.toml)" MAJOR MINOR PATCH SPECIAL
+
+semverParseInto "$(readCargoVariable version "${Cargo_tomls[0]}")" MAJOR MINOR PATCH SPECIAL
 [[ -n $MAJOR ]] || usage
 
 currentVersion="$MAJOR.$MINOR.$PATCH$SPECIAL"
@@ -76,7 +77,7 @@ esac
 newVersion="$MAJOR.$MINOR.$PATCH$SPECIAL"
 
 # Update all the Cargo.toml files
-for Cargo_toml in $Cargo_tomls; do
+for Cargo_toml in "${Cargo_tomls[@]}"; do
   # Set new crate version
   (
     set -x
@@ -88,7 +89,7 @@ for Cargo_toml in $Cargo_tomls; do
     (
       set -x
       sed -i "$Cargo_toml" -e "
-        s/^$crate = .*path = \"\([^\"]*\)\".*\$/$crate = \{ path = \"\1\", version = \"$newVersion\" \}/
+        s/^$crate = { *path *= *\"\([^\"]*\)\" *, *version *= *\"[^\"]*\"\(.*\)} *\$/$crate = \{ path = \"\1\", version = \"$newVersion\"\2 \}/
       "
     )
   done

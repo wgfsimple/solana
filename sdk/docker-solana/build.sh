@@ -1,29 +1,24 @@
 #!/usr/bin/env bash
 set -ex
 
-cd "$(dirname "$0")"
-eval "$(../../ci/channel-info.sh)"
-
-if [[ $BUILDKITE_BRANCH = "$STABLE_CHANNEL" ]]; then
-  CHANNEL=stable
-elif [[ $BUILDKITE_BRANCH = "$EDGE_CHANNEL" ]]; then
-  CHANNEL=edge
-elif [[ $BUILDKITE_BRANCH = "$BETA_CHANNEL" ]]; then
-  CHANNEL=beta
-fi
+cd "$(dirname "$0")"/../..
+eval "$(ci/channel-info.sh)"
+source ci/rust-version.sh
 
 if [[ -z $CHANNEL ]]; then
   echo Unable to determine channel to publish into, exiting.
-  exit 1
+  echo "^^^ +++"
+  exit 0
 fi
 
+cd "$(dirname "$0")"
 rm -rf usr/
-../../ci/docker-run.sh solanalabs/rust:1.31.0 \
+../../ci/docker-run.sh "$rust_stable_docker_image" \
   scripts/cargo-install-all.sh sdk/docker-solana/usr
 
-cp -f entrypoint.sh usr/bin/solana-entrypoint.sh
+cp -f ../../run.sh usr/bin/solana-run.sh
 
-docker build -t solanalabs/solana:$CHANNEL .
+docker build -t solanalabs/solana:"$CHANNEL" .
 
 maybeEcho=
 if [[ -z $CI ]]; then
@@ -37,4 +32,4 @@ else
     fi
   )
 fi
-$maybeEcho docker push solanalabs/solana:$CHANNEL
+$maybeEcho docker push solanalabs/solana:"$CHANNEL"

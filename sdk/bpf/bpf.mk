@@ -10,7 +10,7 @@ endif
 
 INC_DIRS ?=
 SRC_DIR ?= ./src
-TEST_DIR ?= ./test
+TEST_PREFIX ?= test_
 OUT_DIR ?= ./out
 OS := $(shell uname)
 
@@ -26,7 +26,6 @@ endif
 ifdef LLVM_DIR
 CC := $(LLVM_DIR)/bin/clang
 CXX := $(LLVM_DIR)/bin/clang++
-LLC := $(LLVM_DIR)/bin/llc
 LLD := $(LLVM_DIR)/bin/ld.lld
 OBJ_DUMP := $(LLVM_DIR)/bin/llvm-objdump
 endif
@@ -49,15 +48,11 @@ CXX_FLAGS := \
 
 BPF_C_FLAGS := \
   $(C_FLAGS) \
-  -S \
-  -emit-llvm \
   -target bpf \
   -fPIC \
 
 BPF_CXX_FLAGS := \
   $(CXX_FLAGS) \
-  -S \
-  -emit-llvm \
   -target bpf \
   -fPIC \
   -fomit-frame-pointer \
@@ -65,15 +60,12 @@ BPF_CXX_FLAGS := \
   -fno-asynchronous-unwind-tables \
   -fno-unwind-tables \
 
-BPF_LLC_FLAGS := \
-  -march=bpf \
-  -filetype=obj \
-
 BPF_LLD_FLAGS := \
   -z notext \
   -shared \
   --Bdynamic \
   $(LOCAL_PATH)bpf.ld \
+  --entry entrypoint \
 
 OBJ_DUMP_FLAGS := \
   -color \
@@ -112,11 +104,9 @@ help:
 	@echo 'This makefile will build BPF Programs from C or C++ source files into ELFs'
 	@echo ''
 	@echo 'Assumptions:'
-	@echo '  - Programs are a single .c or .cc source file (may include headers)'
-	@echo '  - Programs are located in the source directory: $(SRC_DIR)'
-	@echo '  - Programs are named by their basename (eg. file name:foo.c/foo.cc -> program name:foo)'
-	@echo '  - Tests are located in the test directory: $(TEST_DIR)'
-	@echo '  - Tests are named by their basename (eg. file name:foo.c/foo.cc -> test name:test_foo)'
+	@echo '  - Programs are located in the source directory: $(SRC_DIR)/<program name>'
+	@echo '  - Programs are named by their directory name (eg. directory name:src/foo/ -> program name:foo)'
+	@echo '  - Tests are located in their corresponding program directory and must being with "test_"'
 	@echo '  - Output files will be placed in the directory: $(OUT_DIR)'
 	@echo ''
 	@echo 'User settings'
@@ -127,10 +117,8 @@ help:
 	@echo '      INC_DIRS=$(INC_DIRS)'
 	@echo '    - List of system include directories:'
 	@echo '      SYSTEM_INC_DIRS=$(SYSTEM_INC_DIRS)'
-	@echo '    - Location of source files:'
+	@echo '    - Location of source directories:'
 	@echo '      SRC_DIR=$(SRC_DIR)'
-	@echo '    - Location of test files:'
-	@echo '      TEST_DIR=$(TEST_DIR)'
 	@echo '    - Location to place output files:'
 	@echo '      OUT_DIR=$(OUT_DIR)'
 	@echo '    - Location of LLVM:'
@@ -138,76 +126,125 @@ help:
 	@echo ''
 	@echo 'Usage:'
 	@echo '  - make help - This help message'
-	@echo '  - make all - Build all the programs'
-	@echo '  - make test - Build and run all tests'
+	@echo '  - make all - Build all the programs and tests, run the tests'
+	@echo '  - make programs - Build all the programs'
+	@echo '  - make tests - Build and run all tests'
 	@echo '  - make dump_<program name> - Dumps the contents of the program to stdout'
 	@echo '  - make <program name> - Build a single program by name'
+	@echo '  - make <test name> - Build and run a single test by name'
 	@echo ''
 	@echo 'Available programs:'
 	$(foreach name, $(PROGRAM_NAMES), @echo '  - $(name)'$(\n))
+	@echo ''
 	@echo 'Available tests:'
 	$(foreach name, $(TEST_NAMES), @echo '  - $(name)'$(\n))
 	@echo ''
 	@echo 'Example:'
-	@echo '  - Assuming a programed named foo (src/foo.c)'
+	@echo '  - Assuming a programed named foo (src/foo/foo.c)'
 	@echo '    - make foo'
 	@echo '    - make dump_foo'
 	@echo ''
 
+define C_RULE
+$1: $2
+	@echo "[cc] $1 ($2)"
+	$(_@)mkdir -p $(dir $1)
+	$(_@)$(CC) $(BPF_C_FLAGS) -o $1 -c $2 -MD -MF $(1:.o=.d)
+endef
+
+define CC_RULE
+$1: $2 
+	@echo "[cxx] $1 ($2)"
+	$(_@)mkdir -p $(dir $1)
+	$(_@)$(CXX) $(BPF_CXX_FLAGS) -o $1 -c $2 -MD -MF $(1:.o=.d)
+endef
+
+define O_RULE
+$1: $2
+	@echo "[llc] $1 ($2)"
+	$(_@)mkdir -p $(dir $1)
+	$(_@)$(LLC) $(BPF_LLC_FLAGS) -o $1 $2
+endef
+
+define SO_RULE
+$1: $2
+	@echo "[lld] $1 ($2)"
+	$(_@)mkdir -p $(dir $1)
+	$(_@)$(LLD) $(BPF_LLD_FLAGS) -o $1 $2
+endef
+
+define TEST_C_RULE
+$1: $2
+	@echo "[test cc] $1 ($2)"
+	$(_@)mkdir -p $(dir $1)
+	$(_@)$(CC) $(TEST_C_FLAGS) -o $1 $2 -MD -MF $(1:.o=.d)
+	$(_@)$(MACOS_ADJUST_TEST_DYLIB) $1
+endef
+
+define TEST_CC_RULE
+$1: $2
+	@echo "[test cxx] $1 ($2)"
+	$(_@)mkdir -p $(dir $1)
+	$(_@)$(CXX) $(TEST_CXX_FLAGS) -o $1 $2 -MD -MF $(1:.o=.d)
+	$(_@)$(MACOS_ADJUST_TEST_DYLIB) $1
+endef
+
+define TEST_EXEC_RULE
+$1: $2
+	$2$(\n)
+endef
+
 .PHONY: $(INSTALL_SH)
 $(INSTALL_SH):
-	$(INSTALL_SH)
+	$(_@)$(INSTALL_SH)
 
-.PRECIOUS: $(OUT_DIR)/%.ll
-$(OUT_DIR)/%.ll: $(SRC_DIR)/%.c $(INSTALL_SH)
-	@echo "[cc] $@ ($<)"
-	$(_@)mkdir -p $(OUT_DIR)
-	$(_@)$(CC) $(BPF_C_FLAGS) -o $@ -c $< -MD -MF $(@:.ll=.d)
-
-$(OUT_DIR)/%.ll: $(SRC_DIR)/%.cc $(INSTALL_SH)
-	@echo "[cxx] $@ ($<)"
-	$(_@)mkdir -p $(OUT_DIR)
-	$(_@)$(CXX) $(BPF_CXX_FLAGS) -o $@ -c $< -MD -MF $(@:.ll=.d)
-
-.PRECIOUS: $(OUT_DIR)/%.o
-$(OUT_DIR)/%.o: $(OUT_DIR)/%.ll $(INSTALL_SH)
-	@echo "[llc] $@ ($<)"
-	$(_@)$(LLC) $(BPF_LLC_FLAGS) -o $@ $<
-
-.PRECIOUS: $(OUT_DIR)/%.so
-$(OUT_DIR)/%.so: $(OUT_DIR)/%.o $(INSTALL_SH)
-	@echo "[lld] $@ ($<)"
-	$(_@)$(LLD) $(BPF_LLD_FLAGS) -o $@ $<
-
-$(OUT_DIR)/test_%: $(TEST_DIR)/%.c $(INSTALL_SH)
-	@echo "[test cc] $@ ($<)"
-	$(_@)mkdir -p $(OUT_DIR)
-	$(_@)$(CC) $(TEST_C_FLAGS) -o $@ $< -MD -MF $(@:=.d)
-	$(_@)$(MACOS_ADJUST_TEST_DYLIB) $@
-
-$(OUT_DIR)/test_%: $(TEST_DIR)/%.cc $(INSTALL_SH)
-	@echo "[test cxx] $@ ($<)"
-	$(_@)mkdir -p $(OUT_DIR)
-	$(_@)$(CXX) $(TEST_CXX_FLAGS) -o $@ $< -MD -MF $(@:=.d)
-	$(_@)$(MACOS_ADJUST_TEST_DYLIB) $@
-
--include $(wildcard $(OUT_DIR)/*.d)
-
-PROGRAM_NAMES := $(notdir $(basename $(wildcard $(SRC_DIR)/*.c $(SRC_DIR)/*.cc)))
-TEST_NAMES := $(addprefix test_,$(notdir $(basename $(wildcard $(TEST_DIR)/*.c))))
+PROGRAM_NAMES := $(notdir $(basename $(wildcard $(SRC_DIR)/*)))
 
 define \n
 
 
 endef
 
-all: $(PROGRAM_NAMES)
+all: programs tests
 
-test: $(TEST_NAMES)
-	$(foreach test, $(TEST_NAMES), $(OUT_DIR)/$(test)$(\n))
+$(foreach PROGRAM, $(PROGRAM_NAMES), \
+  $(eval -include $(wildcard $(OUT_DIR)/$(PROGRAM)/*.d)) \
+  \
+  $(eval $(PROGRAM): %: $(addprefix $(OUT_DIR)/, %.so)) \
+  $(eval $(PROGRAM)_SRCS := \
+    $(addprefix $(SRC_DIR)/$(PROGRAM)/, \
+    $(filter-out $(TEST_PREFIX)%,$(notdir $(wildcard $(SRC_DIR)/$(PROGRAM)/*.c $(SRC_DIR)/$(PROGRAM)/*.cc))))) \
+  $(eval $(PROGRAM)_OBJS := $(subst $(SRC_DIR), $(OUT_DIR), \
+    $(patsubst %.c,%.o, \
+    $(patsubst %.cc,%.o,$($(PROGRAM)_SRCS))))) \
+	$(eval $($(PROGRAM)_SRCS): $(INSTALL_SH)) \
+  $(eval $(call SO_RULE,$(OUT_DIR)/$(PROGRAM).so,$($(PROGRAM)_OBJS))) \
+  $(foreach _,$(filter %.c,$($(PROGRAM)_SRCS)), \
+    $(eval $(call C_RULE,$(subst $(SRC_DIR),$(OUT_DIR),$(_:%.c=%.o)),$_))) \
+  $(foreach _,$(filter %.cc,$($(PROGRAM)_SRCS)), \
+    $(eval $(call CC_RULE,$(subst $(SRC_DIR),$(OUT_DIR),$(_:%.cc=%.o)),$_))) \
+  \
+  $(eval TESTS := $(notdir $(basename $(wildcard $(SRC_DIR)/$(PROGRAM)/$(TEST_PREFIX)*.c)))) \
+  $(eval $(TESTS) : %: $(addprefix $(OUT_DIR)/$(PROGRAM)/, %)) \
+  $(eval TEST_NAMES := $(TEST_NAMES) $(TESTS)) \
+  $(foreach TEST, $(TESTS), \
+    $(eval $(TEST)_SRCS := \
+      $(addprefix $(SRC_DIR)/$(PROGRAM)/, \
+      $(notdir $(wildcard $(SRC_DIR)/$(PROGRAM)/$(TEST).c $(SRC_DIR)/$(PROGRAM)/$(TEST).cc)))) \
+		$(eval $($(TEST)_SRCS): $(INSTALL_SH)) \
+    $(foreach _,$(filter %.c,$($(TEST)_SRCS)), \
+      $(eval $(call TEST_C_RULE,$(subst $(SRC_DIR),$(OUT_DIR),$(_:%.c=%)),$_))) \
+    $(foreach _,$(filter %.cc, $($(TEST)_SRCS)), \
+      $(eval $(call TEST_CC_RULE,$(subst $(SRC_DIR),$(OUT_DIR),$(_:%.cc=%)),$_))) \
+    $(eval $(call TEST_EXEC_RULE,$(TEST),$(addprefix $(OUT_DIR)/$(PROGRAM)/, $(TEST)))) \
+   ) \
+)
 
-$(PROGRAM_NAMES): %: $(addprefix $(OUT_DIR)/, %.so) ;
-$(TEST_NAMES): %: $(addprefix $(OUT_DIR)/, %) ;
+.PHONY: $(PROGRAM_NAMES)
+programs: $(PROGRAM_NAMES)
+
+.PHONY: $(TEST_NAMES)
+tests: $(TEST_NAMES)
 
 dump_%: %
 	$(_@)$(OBJ_DUMP) $(OBJ_DUMP_FLAGS) $(addprefix $(OUT_DIR)/, $(addsuffix .so, $<))

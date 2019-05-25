@@ -19,28 +19,36 @@ mkdir -p "$netConfigDir" "$netLogDir"
 source "$(dirname "${BASH_SOURCE[0]}")"/../scripts/configure-metrics.sh
 
 configFile="$netConfigDir/config"
+geoipConfigFile="$netConfigDir/geoip.yml"
 
 entrypointIp=
 publicNetwork=
 netBasename=
 sshPrivateKey=
+externalNodeSshKey=
 sshOptions=()
 fullnodeIpList=()
 fullnodeIpListPrivate=()
+fullnodeIpListZone=()
 clientIpList=()
 clientIpListPrivate=()
-leaderRotation=
+clientIpListZone=()
+blockstreamerIpList=()
+blockstreamerIpListPrivate=()
+blockstreamerIpListZone=()
 
 buildSshOptions() {
   sshOptions=(
+    -o "ConnectTimeout=20"
     -o "BatchMode=yes"
     -o "StrictHostKeyChecking=no"
     -o "UserKnownHostsFile=/dev/null"
     -o "User=solana"
     -o "IdentityFile=$sshPrivateKey"
     -o "LogLevel=ERROR"
-    -F /dev/null
   )
+
+  [[ -z $externalNodeSshKey ]] || sshOptions+=(-o "IdentityFile=$externalNodeSshKey")
 }
 
 loadConfigFile() {
@@ -51,9 +59,9 @@ loadConfigFile() {
   [[ -n "$publicNetwork" ]] || usage "Config file invalid, publicNetwork unspecified: $configFile"
   [[ -n "$netBasename" ]] || usage "Config file invalid, netBasename unspecified: $configFile"
   [[ -n $sshPrivateKey ]] || usage "Config file invalid, sshPrivateKey unspecified: $configFile"
-  [[ -n $leaderRotation ]] || usage "Config file invalid, leaderRotation unspecified: $configFile"
   [[ ${#fullnodeIpList[@]} -gt 0 ]] || usage "Config file invalid, fullnodeIpList unspecified: $configFile"
   [[ ${#fullnodeIpListPrivate[@]} -gt 0 ]] || usage "Config file invalid, fullnodeIpListPrivate unspecified: $configFile"
+  [[ ${#fullnodeIpList[@]} -eq ${#fullnodeIpListPrivate[@]} ]] || usage "Config file invalid, fullnodeIpList/fullnodeIpListPrivate length mismatch: $configFile"
 
   if $publicNetwork; then
     entrypointIp=${fullnodeIpList[0]}

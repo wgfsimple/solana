@@ -26,7 +26,9 @@ Furthermore, and much to our surprise, it can be implemented using a mechanism t
 Architecture
 ===
 
-Before you jump into the code, review the online book [Solana: Blockchain Rebuilt for Scale](https://solana-labs.github.io/solana/).
+Before you jump into the code, review the online book [Solana: Blockchain Rebuilt for Scale](https://solana-labs.github.io/book/).
+
+(The _latest_ development version of the online book is also [available here](https://solana-labs.github.io/book-edge/).)
 
 Developing
 ===
@@ -39,10 +41,10 @@ Install rustc, cargo and rustfmt:
 ```bash
 $ curl https://sh.rustup.rs -sSf | sh
 $ source $HOME/.cargo/env
-$ rustup component add rustfmt-preview
+$ rustup component add rustfmt
 ```
 
-If your rustc version is lower than 1.31.0, please update it:
+If your rustc version is lower than 1.34.0, please update it:
 
 ```bash
 $ rustup update
@@ -64,7 +66,12 @@ $ cd solana
 Build
 
 ```bash
-$ cargo build --all
+$ cargo build
+```
+
+Then to run a minimal local cluster
+```bash
+$ ./run.sh
 ```
 
 Testing
@@ -73,19 +80,13 @@ Testing
 Run the test suite:
 
 ```bash
-$ cargo test --all
-```
-
-To emulate all the tests that will run on a Pull Request, run:
-
-```bash
-$ ./ci/run-local.sh
+$ cargo test
 ```
 
 Local Testnet
 ---
 
-Start your own testnet locally, instructions are in the book [Solana: Blockchain Rebuild for Scale: Getting Started](https://solana-labs.github.io/solana/getting-started.html).
+Start your own testnet locally, instructions are in the book [Solana: Blockchain Rebuild for Scale: Getting Started](https://solana-labs.github.io/book/getting-started.html).
 
 Remote Testnets
 ---
@@ -103,10 +104,7 @@ We maintain several testnets:
 
 They are deployed with the `ci/testnet-manager.sh` script through a list of [scheduled
 buildkite jobs](https://buildkite.com/solana-labs/testnet-management/settings/schedules).
-Each testnet can be manually manipulated from buildkite as well.  The `-perf`
-testnets use a release tarball while the non`-perf` builds use the snap build
-(we've observed that the snap build runs slower than a tarball but this has yet
-to be root caused).
+Each testnet can be manually manipulated from buildkite as well.
 
 ## How do I reset the testnet?
 Manually trigger the [testnet-management](https://buildkite.com/solana-labs/testnet-management) pipeline
@@ -127,10 +125,52 @@ can run your own testnet using the scripts in the `net/` directory.
 Edit `ci/testnet-manager.sh`
 
 
+## Metrics Server Maintenance
+Sometimes the dashboard becomes unresponsive. This happens due to glitch in the metrics server.
+The current solution is to reset the metrics server. Use the following steps.
+
+1. The server is hosted in a GCP VM instance. Check if the VM instance is down by trying to SSH
+ into it from the GCP console. The name of the VM is ```metrics-solana-com```.
+2. If the VM is inaccessible, reset it from the GCP console.
+3. Once VM is up (or, was already up), the metrics services can be restarted from build automation.
+    1. Navigate to https://buildkite.com/solana-labs/metrics-dot-solana-dot-com in your web browser
+    2. Click on ```New Build```
+    3. This will show a pop up dialog. Click on ```options``` drop down.
+    4. Type in ```FORCE_START=true``` in ```Environment Variables``` text box.
+    5. Click ```Create Build```
+    6. This will restart the metrics services, and the dashboards should be accessible afterwards.
+
+## Debugging Testnet
+Testnet may exhibit different symptoms of failures. Primary statistics to check are
+1. Rise in Confirmation Time
+2. Nodes are not voting
+3. Panics, and OOM notifications
+
+Check the following if there are any signs of failure.
+1. Did testnet deployment fail?
+    1. View buildkite logs for the last deployment: https://buildkite.com/solana-labs/testnet-management
+    2. Use the relevant branch
+    3. If the deployment failed, look at the build logs. The build artifacts for each remote node is uploaded.
+       It's a good first step to triage from these logs.
+2. You may have to log into remote node if the deployment succeeded, but something failed during runtime.
+    1. Get the private key for the testnet deployment from ```metrics-solana-com``` GCP instance.
+    2. SSH into ```metrics-solana-com``` using GCP console and do the following.
+    ```bash
+    sudo bash
+    cd ~buildkite-agent/.ssh
+    ls
+    ```
+    3. Copy the relevant private key to your local machine
+    4. Find the public IP address of the AWS instance for the remote node using AWS console
+    5. ```ssh -i <private key file> ubuntu@<ip address of remote node>```
+    6. The logs are in ```~solana\solana``` folder
+
+
 Benchmarking
 ---
 
-First install the nightly build of rustc. `cargo bench` requires unstable features:
+First install the nightly build of rustc. `cargo bench` requires use of the
+unstable features only available in the nightly build.
 
 ```bash
 $ rustup install nightly
@@ -139,7 +179,7 @@ $ rustup install nightly
 Run the benchmarks:
 
 ```bash
-$ cargo +nightly bench --features="unstable"
+$ cargo +nightly bench
 ```
 
 Release Process

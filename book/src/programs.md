@@ -3,8 +3,8 @@
 A client *app* interacts with a Solana cluster by sending it *transactions*
 with one or more *instructions*. The Solana *runtime* passes those instructions
 to user-contributed *programs*. An instruction might, for example, tell a
-program to move *tokens* from one *account* to another or create an interactive
-contract that governs how tokens are moved. Instructions are executed
+program to transfer *lamports* from one *account* to another or create an interactive
+contract that governs how lamports are transfered. Instructions are executed
 atomically. If any instruction is invalid, any changes made within the
 transaction are discarded.
 
@@ -21,9 +21,7 @@ used to reference the program in subsequent transactions.
 A program may be written in any programming language that can target the
 Berkley Packet Filter (BPF) safe execution environment. The Solana SDK offers
 the best support for C programs, which is compiled to BPF using the [LLVM
-compiler infrastructure](https://llvm.org). Alternatively, a client might
-choose to bypass LLVM and use Python, Lua or C++ to generate BPF directly via
-the [BPF Compiler Collection](https://github.com/iovisor/bcc) (BCC).
+compiler infrastructure](https://llvm.org).
 
 ## Storing State between Transactions
 

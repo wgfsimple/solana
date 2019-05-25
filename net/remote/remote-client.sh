@@ -7,7 +7,10 @@ echo "$(date) | $0 $*" > client.log
 
 deployMethod="$1"
 entrypointIp="$2"
-RUST_LOG="$3"
+clientToRun="$3"
+RUST_LOG="$4"
+benchTpsExtraArgs="$5"
+benchExchangeExtraArgs="$6"
 export RUST_LOG=${RUST_LOG:-solana=info} # if RUST_LOG is unset, default to info
 
 missing() {
@@ -27,12 +30,6 @@ if [[ $threadCount -gt 4 ]]; then
 fi
 
 case $deployMethod in
-snap)
-  net/scripts/rsync-retry.sh -vPrc "$entrypointIp:~/solana/solana.snap" .
-  sudo snap install solana.snap --devmode --dangerous
-
-  solana_bench_tps=/snap/bin/solana.bench-tps
-  ;;
 local|tar)
   PATH="$HOME"/.cargo/bin:"$PATH"
   export USE_INSTALL=1
@@ -42,28 +39,51 @@ local|tar)
   source ./target/perf-libs/env.sh
 
   net/scripts/rsync-retry.sh -vPrc "$entrypointIp:~/.cargo/bin/solana*" ~/.cargo/bin/
-  solana_bench_tps=solana-bench-tps
   ;;
 *)
   echo "Unknown deployment method: $deployMethod"
   exit 1
 esac
 
-scripts/oom-monitor.sh > oom-monitor.log 2>&1 &
+(
+  sudo scripts/oom-monitor.sh
+) > oom-monitor.log 2>&1 &
 scripts/net-stats.sh  > net-stats.log 2>&1 &
 
 ! tmux list-sessions || tmux kill-session
 
-clientCommand="\
-  $solana_bench_tps \
-    --network $entrypointIp:8001 \
-    --drone $entrypointIp:9900 \
-    --duration 7500 \
-    --sustained \
-    --threads $threadCount \
-"
+case $clientToRun in
+solana-bench-tps)
+  clientCommand="\
+    solana-bench-tps \
+      --entrypoint $entrypointIp:8001 \
+      --drone $entrypointIp:9900 \
+      --duration 7500 \
+      --sustained \
+      --threads $threadCount \
+      $benchTpsExtraArgs \
+  "
+  ;;
+solana-bench-exchange)
+  solana-keygen -o bench.keypair
+  clientCommand="\
+    solana-bench-exchange \
+      --entrypoint $entrypointIp:8001 \
+      --drone $entrypointIp:9900 \
+      --threads $threadCount \
+      --batch-size 1000 \
+      --fund-amount 20000 \
+      --duration 7500 \
+      --identity bench.keypair \
+      $benchExchangeExtraArgs \
+  "
+  ;;
+*)
+  echo "Unknown client name: $clientToRun"
+  exit 1
+esac
 
-tmux new -s solana-bench-tps -d "
+tmux new -s "$clientToRun" -d "
   while true; do
     echo === Client start: \$(date) | tee -a client.log
     $metricsWriteDatapoint 'testnet-deploy client-begin=1'
@@ -73,4 +93,4 @@ tmux new -s solana-bench-tps -d "
   done
 "
 sleep 1
-tmux capture-pane -t solana-bench-tps -p -S -100
+tmux capture-pane -t "$clientToRun" -p -S -100

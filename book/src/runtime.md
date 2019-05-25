@@ -6,7 +6,7 @@ separating program code from the state it operates on, the runtime is able to
 choreograph concurrent access. Transactions accessing only credit-only
 accounts are executed in parallel whereas transactions accessing writable
 accounts are serialized.  The runtime interacts with the program through an
-entrypoint with a well-defined interface.  The userdata stored in an account is
+entrypoint with a well-defined interface.  The data stored in an account is
 an opaque type, an array of bytes. The program has full control over its
 contents.
 
@@ -18,7 +18,7 @@ transaction fails to commit.
 
 ### Account Structure
 
-Accounts maintain a token balance and program-specific memory.
+Accounts maintain a lamport balance and program-specific memory.
 
 # Transaction Engine
 
@@ -27,58 +27,90 @@ entrypoint.
 
 ## Execution
 
-Transactions are batched and processed in a pipeline
+Transactions are batched and processed in a pipeline.  The TPU and TVU follow a
+slightly different path.  The TPU runtime ensures that PoH record occurs before
+memory is committed.
+
+The TVU runtime ensures that PoH verification occurs before the runtime
+processes any transactions.
 
 <img alt="Runtime pipeline" src="img/runtime.svg" class="center"/>
 
-At the *execute* stage, the loaded pages have no data dependencies, so all the
+At the *execute* stage, the loaded accounts have no data dependencies, so all the
 programs can be executed in parallel.
 
 The runtime enforces the following rules:
 
 1. Only the *owner* program may modify the contents of an account.  This means
-   that upon assignment userdata vector is guaranteed to be zero.
+that upon assignment data vector is guaranteed to be zero.
+
 2. Total balances on all the accounts is equal before and after execution of a
-   transaction.
+transaction.
+
 3. After the transaction is executed, balances of credit-only accounts must be
-   greater than or equal to the balances before the transaction.
+greater than or equal to the balances before the transaction.
+
 4. All instructions in the transaction executed atomically. If one fails, all
-   account modifications are discarded.
+account modifications are discarded.
 
 Execution of the program involves mapping the program's public key to an
 entrypoint which takes a pointer to the transaction, and an array of loaded
-pages.
+accounts.
 
 ## SystemProgram Interface
 
-The interface is best described by the `Instruction::userdata` that the user
+The interface is best described by the `Instruction::data` that the user
 encodes.
 
-* `CreateAccount` - This allows the user to create and assign an account to a
-  Program.
-* `Assign` - allows the user to assign an existing account to a program.
-* `Move`  - moves tokens between account's that are associated with
-* `Spawn` - spawn a new program from an account
+* `CreateAccount` - This allows the user to create an account with an allocated
+data array and assign it to a Program.
+
+* `Assign` - Allows the user to assign an existing account to a program.
+
+* `Transfer`  - Transfers lamports between accounts.
+
+## Program State Security
+
+For blockchain to function correctly, the program code must be resilient to user
+inputs.  That is why in this design the program specific code is the only code
+that can change the state of the data byte array in the Accounts that are
+assigned to it.  It is also the reason why `Assign` or `CreateAccount` must zero
+out the data.  Otherwise there would be no possible way for the program to
+distinguish the recently assigned account data from a natively generated
+state transition without some additional metadata from the runtime to indicate
+that this memory is assigned instead of natively generated.
+
+To pass messages between programs, the receiving program must accept the message
+and copy the state over.  But in practice a copy isn't needed and is
+undesirable. The receiving program can read the state belonging to other
+Accounts without copying it, and during the read it has a guarantee of the
+sender program's state.
 
 ## Notes
 
-1. There is no dynamic memory allocation.  Client's need to use `CreateAccount`
+* There is no dynamic memory allocation.  Client's need to use `CreateAccount`
 instructions to create memory before passing it to another program.  This
 instruction can be composed into a single transaction with the call to the
 program itself.
-2. Runtime guarantees that when memory is assigned to the program it is zero
-initialized.
-3. Runtime guarantees that a program's code is the only thing that can modify
-memory that its assigned to
-4. Runtime guarantees that the program can only spend tokens that are in
-accounts that are assigned to it
-5. Runtime guarantees the balances belonging to accounts are balanced before
-and after the transaction
-6. Runtime guarantees that multiple instructions all executed successfully when
-a transaction is committed.
+
+* `CreateAccount` and `Assign` guarantee that when account is assigned to the
+program, the Account's data is zero initialized.
+
+* Once assigned to program an Account cannot be reassigned.
+
+* Runtime guarantees that a program's code is the only code that can modify
+Account data that the Account is assigned to.
+
+* Runtime guarantees that the program can only spend lamports that are in
+accounts that are assigned to it.
+
+* Runtime guarantees the balances belonging to accounts are balanced before
+and after the transaction.
+
+* Runtime guarantees that instructions all executed successfully when a
+transaction is committed.
 
 # Future Work
 
 * [Continuations and Signals for long running
   Transactions](https://github.com/solana-labs/solana/issues/1485)
-

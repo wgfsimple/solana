@@ -15,55 +15,6 @@ proof and it also requires the validator to have the entirety of the encrypted
 data present for verification of every proof of every identity. So the space
 required to validate is `number_of_proofs * data_size`
 
-## Terminology
-
-#### replicator
-
-Storage mining client, stores some part of the ledger enumerated in blocks and
-submits storage proofs to the chain. Not a full-node.
-
-#### ledger segment
-
-Portion of the ledger which is downloaded by the replicator where storage proof
-data is derived.
-
-#### CBC block
-
-Smallest encrypted chunk of ledger, an encrypted ledger segment would be made of
-many CBC blocks. `ledger_segment_size / cbc_block_size` to be exact.
-
-#### storage proof
-
-A set of sha hash state which is constructed by sampling the encrypted version
-of the stored ledger segment at certain offsets.
-
-#### fake storage proof
-
-A proof which has the same format as a storage proof, but the sha state is
-actually from hashing a known ledger value which the storage client can reveal
-and is also easily verifiable by the network on-chain.
-
-#### storage proof confirmation
-
-A transaction by a validator which indicates the set of real and fake proofs
-submitted by a storage miner. The transaction would contain a list of proof
-hash values and a bit which says if this hash is valid or fake.
-
-#### storage proof challenge
-
-A transaction from a replicator that verifiably proves that a validator
-confirmed a fake proof.
-
-#### storage proof claim
-
-A transaction from a validator which is after the timeout period given from the
-storage proof confirmation and which no successful challenges have been
-observed which rewards the parties of the storage proofs and confirmations.
-
-#### storage validation capacity
-
-The number of keys and samples that a validator can verify each storage epoch.
-
 ## Optimization with PoH
 
 Our improvement on this approach is to randomly sample the encrypted segments
@@ -72,7 +23,7 @@ PoH ledger. Thus the segments stay in the exact same order for every PoRep and
 verification can stream the data and verify all the proofs in a single batch.
 This way we can verify multiple proofs concurrently, each one on its own CUDA
 core. The total space required for verification is `1_ledger_segment +
-2_cbc_blocks * number_of_identities` with core count of equal to
+2_cbc_blocks * number_of_identities` with core count equal to
 `number_of_identities`. We use a 64-byte chacha CBC block size.
 
 ## Network
@@ -80,7 +31,7 @@ core. The total space required for verification is `1_ledger_segment +
 Validators for PoRep are the same validators that are verifying transactions.
 They have some stake that they have put up as collateral that ensures that
 their work is honest. If you can prove that a validator verified a fake PoRep,
-then the validators stake can be slashed.
+then the validator will not receive a reward for that storage epoch.
 
 Replicators are specialized *light clients*. They download a part of the ledger
 and store it, and provide PoReps of storing the ledger. For each verified PoRep
@@ -102,7 +53,7 @@ changes to determine what rate it can validate storage proofs.
 
 ### Constants
 
-1. NUM\_STORAGE\_ENTRIES: Number of entries in a segment of ledger data. The
+1. SLOTS\_PER\_SEGMENT: Number of slots in a segment of ledger data. The
 unit of storage for a replicator.
 2. NUM\_KEY\_ROTATION\_TICKS: Number of ticks to save a PoH value and cause a
 key generation for the section of ledger just generated and the rotation of
@@ -123,27 +74,10 @@ transaction which tells the network how many proofs it can process in a given
 period defined by NUM\_KEY\_ROTATION\_TICKS.
 2. Every NUM\_KEY\_ROTATION\_TICKS the validator stores the PoH value at that
 height.
-3. Every NUM\_KEY\_ROTATION\_TICKS it also validates samples received from
-replicators. It signs the PoH hash at that point and uses the following
-algorithm with the signature as the input:
-     - The low 5 bits of the first byte of the signature creates an index into
-       another starting byte of the signature.
-     - The validator then looks at the set of storage proofs where the byte of
-       the proof's sha state vector starting from the low byte matches exactly
-with the chosen byte(s) of the signature.
-     - If the set of proofs is larger than the validator can handle, then it
-       increases to matching 2 bytes in the signature.
-     - Validator continues to increase the number of matching bytes until a
-       workable set is found.
-     - It then creates a mask of valid proofs and fake proofs and sends it to
-       the leader. This is a storage proof confirmation transaction.
+3. Validator generates a storage proof confirmation transaction.
 4. The storage proof confirmation transaction is integrated into the ledger.
-5. After a lockout period of NUM\_SECONDS\_STORAGE\_LOCKOUT seconds, the
-validator then submits a storage proof claim transaction which then causes the
-distribution of the storage reward if no challenges were seen for the proof to
-the validators and replicators party to the proofs.
 6. Validator responds to RPC interfaces for what the last storage epoch PoH
-value is and its entry\_height.
+value is and its slot.
 
 ### Replicator behavior
 
@@ -152,7 +86,7 @@ ledger data, they have to rely on other full nodes (validators) for
 information. Any given validator may or may not be malicious and give incorrect
 information, although there are not any obvious attack vectors that this could
 accomplish besides having the replicator do extra wasted work.  For many of the
-operations there are number of options depending on how paranoid a replicator
+operations there are a number of options depending on how paranoid a replicator
 is:
     - (a) replicator can ask a validator
     - (b) replicator can ask multiple validators
@@ -161,10 +95,10 @@ is:
     - (d) replicator can subscribe to an abbreviated transaction stream to
       generate the information itself
 2. A replicator obtains the PoH hash corresponding to the last key rotation
-along with its entry\_height.
+along with its slot.
 3. The replicator signs the PoH hash with its keypair. That signature is the
 seed used to pick the segment to replicate and also the encryption key. The
-replicator mods the signature with the entry\_height to get which segment to
+replicator mods the signature with the slot to get which segment to
 replicate.
 4. The replicator retrives the ledger by asking peer validators and
 replicators. See 6.5.
@@ -179,24 +113,14 @@ segment.
 8. The replicator sends a PoRep proof transaction which contains its sha state
 at the end of the sampling operation, its seed and the samples it used to the
 current leader and it is put onto the ledger.
-9. The replicator then generates another set of offsets which it submits a fake
-proof with an incorrect sha state. It can be proven to be fake by providing the
-seed for the hash result.
-     - A fake proof should consist of a replicator hash of a signature of a PoH
-       value. That way when the replicator reveals the fake proof, it can be
-verified on chain.
-10. The replicator monitors the ledger, if it sees a fake proof integrated, it
-creates a challenge transaction and submits it to the current leader. The
-transacation proves the validator incorrectly validated a fake storage proof.
-The replicator is rewarded and the validator's staking balance is slashed or
-frozen.
+
 
 ### Finding who has a given block of ledger
 
 1. Validators monitor the transaction stream for storage mining proofs, and
-keep a mapping of ledger segments by entry\_height to public keys. When it sees
+keep a mapping of ledger segments by slot to public keys. When it sees
 a storage mining proof it updates this mapping and provides an RPC interface
-which takes an entry\_height and hands back a list of public keys.  The client
+which takes a slot and hands back a list of public keys.  The client
 then looks up in their cluster\_info table to see which network address that
 corresponds to and sends a repair request to retrieve the necessary blocks of
 ledger.

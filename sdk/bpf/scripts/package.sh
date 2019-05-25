@@ -8,10 +8,10 @@ mkdir bpf-sdk/
 cp LICENSE bpf-sdk/
 
 (
-  ci/crate-version.sh
+  ci/crate-version.sh sdk/Cargo.toml
   git rev-parse HEAD
 ) > bpf-sdk/version.txt
 
-cp -ra sdk/bpf/* bpf-sdk/
+cp -a sdk/bpf/* bpf-sdk/
 
 tar jvcf bpf-sdk.tar.bz2 bpf-sdk/

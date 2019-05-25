@@ -4,38 +4,44 @@ use crate::pubkey::Pubkey;
 use bs58;
 use generic_array::typenum::U64;
 use generic_array::GenericArray;
-use ring::signature::Ed25519KeyPair;
-use ring::{rand, signature};
+use rand::rngs::OsRng;
 use serde_json;
+use solana_ed25519_dalek as ed25519_dalek;
 use std::error;
 use std::fmt;
 use std::fs::{self, File};
 use std::io::Write;
+use std::mem;
 use std::path::Path;
-use untrusted::Input;
+use std::str::FromStr;
 
-pub type Keypair = Ed25519KeyPair;
+pub type Keypair = ed25519_dalek::Keypair;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Signature(GenericArray<u8, U64>);
 
 impl Signature {
     pub fn new(signature_slice: &[u8]) -> Self {
-        Signature(GenericArray::clone_from_slice(&signature_slice))
+        Self(GenericArray::clone_from_slice(&signature_slice))
     }
 
     pub fn verify(&self, pubkey_bytes: &[u8], message_bytes: &[u8]) -> bool {
-        let pubkey = Input::from(pubkey_bytes);
-        let message = Input::from(message_bytes);
-        let signature = Input::from(self.0.as_slice());
-        signature::verify(&signature::ED25519, pubkey, message, signature).is_ok()
+        let pubkey = ed25519_dalek::PublicKey::from_bytes(pubkey_bytes);
+        let signature = ed25519_dalek::Signature::from_bytes(self.0.as_slice());
+        if pubkey.is_err() || signature.is_err() {
+            return false;
+        }
+        pubkey
+            .unwrap()
+            .verify(message_bytes, &signature.unwrap())
+            .is_ok()
     }
 }
 
 pub trait Signable {
     fn sign(&mut self, keypair: &Keypair) {
         let data = self.signable_data();
-        self.set_signature(Signature::new(&keypair.sign(&data).as_ref()));
+        self.set_signature(keypair.sign_message(&data));
     }
     fn verify(&self) -> bool {
         self.get_signature()
@@ -66,53 +72,135 @@ impl fmt::Display for Signature {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParseSignatureError {
+    WrongSize,
+    Invalid,
+}
+
+impl FromStr for Signature {
+    type Err = ParseSignatureError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let bytes = bs58::decode(s)
+            .into_vec()
+            .map_err(|_| ParseSignatureError::Invalid)?;
+        if bytes.len() != mem::size_of::<Signature>() {
+            Err(ParseSignatureError::WrongSize)
+        } else {
+            Ok(Signature::new(&bytes))
+        }
+    }
+}
+
 pub trait KeypairUtil {
     fn new() -> Self;
     fn pubkey(&self) -> Pubkey;
+    fn sign_message(&self, message: &[u8]) -> Signature;
 }
 
-impl KeypairUtil for Ed25519KeyPair {
+impl KeypairUtil for Keypair {
     /// Return a new ED25519 keypair
     fn new() -> Self {
-        let rng = rand::SystemRandom::new();
-        let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rng).expect("generate_pkcs8");
-        Ed25519KeyPair::from_pkcs8(Input::from(&pkcs8_bytes)).expect("from_pcks8")
+        let mut rng = OsRng::new().unwrap();
+        Keypair::generate(&mut rng)
     }
 
     /// Return the public key for the given keypair
     fn pubkey(&self) -> Pubkey {
-        Pubkey::new(self.public_key_bytes())
+        Pubkey::new(&self.public.as_ref())
+    }
+
+    fn sign_message(&self, message: &[u8]) -> Signature {
+        Signature::new(&self.sign(message).to_bytes())
     }
 }
 
-pub fn read_pkcs8(path: &str) -> Result<Vec<u8>, Box<error::Error>> {
-    let file = File::open(path.to_string())?;
-    let pkcs8: Vec<u8> = serde_json::from_reader(file)?;
-    Ok(pkcs8)
-}
-
 pub fn read_keypair(path: &str) -> Result<Keypair, Box<error::Error>> {
-    let pkcs8 = read_pkcs8(path)?;
-    let keypair = Ed25519KeyPair::from_pkcs8(Input::from(&pkcs8))?;
+    let file = File::open(path.to_string())?;
+    let bytes: Vec<u8> = serde_json::from_reader(file)?;
+    let keypair = Keypair::from_bytes(&bytes)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
     Ok(keypair)
 }
 
-pub fn gen_pkcs8() -> Result<Vec<u8>, Box<error::Error>> {
-    let rnd = rand::SystemRandom::new();
-    let pkcs8_bytes = Ed25519KeyPair::generate_pkcs8(&rnd)?;
-    Ok(pkcs8_bytes.to_vec())
-}
-
-//pub fn gen_keypair_file(outfile: String) -> Result<String, Box<dyn error::Error>> {
-pub fn gen_keypair_file(outfile: String) -> Result<String, Box<error::Error>> {
-    let serialized = serde_json::to_string(&gen_pkcs8()?)?;
+pub fn gen_keypair_file(outfile: &str) -> Result<String, Box<error::Error>> {
+    let keypair_bytes = Keypair::new().to_bytes();
+    let serialized = serde_json::to_string(&keypair_bytes.to_vec())?;
 
     if outfile != "-" {
-        if let Some(outdir) = Path::new(&outfile).parent() {
+        if let Some(outdir) = Path::new(outfile).parent() {
             fs::create_dir_all(outdir)?;
         }
         let mut f = File::create(outfile)?;
         f.write_all(&serialized.clone().into_bytes())?;
     }
     Ok(serialized)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem;
+
+    fn tmp_file_path(name: &str) -> String {
+        use std::env;
+        let out_dir = env::var("OUT_DIR").unwrap_or_else(|_| "target".to_string());
+        let keypair = Keypair::new();
+
+        format!("{}/tmp/{}-{}", out_dir, name, keypair.pubkey()).to_string()
+    }
+
+    #[test]
+    fn test_gen_keypair_file() {
+        let outfile = tmp_file_path("test_gen_keypair_file.json");
+        let serialized_keypair = gen_keypair_file(&outfile).unwrap();
+        let keypair_vec: Vec<u8> = serde_json::from_str(&serialized_keypair).unwrap();
+        assert!(Path::new(&outfile).exists());
+        assert_eq!(
+            keypair_vec,
+            read_keypair(&outfile).unwrap().to_bytes().to_vec()
+        );
+        assert_eq!(
+            read_keypair(&outfile).unwrap().pubkey().as_ref().len(),
+            mem::size_of::<Pubkey>()
+        );
+        fs::remove_file(&outfile).unwrap();
+        assert!(!Path::new(&outfile).exists());
+    }
+
+    #[test]
+    fn test_signature_fromstr() {
+        let signature = Keypair::new().sign_message(&[0u8]);
+
+        let mut signature_base58_str = bs58::encode(signature).into_string();
+
+        assert_eq!(signature_base58_str.parse::<Signature>(), Ok(signature));
+
+        signature_base58_str.push_str(&bs58::encode(signature.0).into_string());
+        assert_eq!(
+            signature_base58_str.parse::<Signature>(),
+            Err(ParseSignatureError::WrongSize)
+        );
+
+        signature_base58_str.truncate(signature_base58_str.len() / 2);
+        assert_eq!(signature_base58_str.parse::<Signature>(), Ok(signature));
+
+        signature_base58_str.truncate(signature_base58_str.len() / 2);
+        assert_eq!(
+            signature_base58_str.parse::<Signature>(),
+            Err(ParseSignatureError::WrongSize)
+        );
+
+        let mut signature_base58_str = bs58::encode(signature.0).into_string();
+        assert_eq!(signature_base58_str.parse::<Signature>(), Ok(signature));
+
+        // throw some non-base58 stuff in there
+        signature_base58_str.replace_range(..1, "I");
+        assert_eq!(
+            signature_base58_str.parse::<Signature>(),
+            Err(ParseSignatureError::Invalid)
+        );
+    }
+
 }
